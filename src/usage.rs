@@ -50,9 +50,18 @@ impl Usage {
         )
     }
 
+    /// Codex names its windows by position rather than duration, and which
+    /// duration lands in which slot depends on the plan: on Pro the primary
+    /// window is the seven-day one and the secondary is absent, so trusting
+    /// the position reports a weekly figure as "5h".
     pub fn parse_codex(body: &Value) -> Option<Self> {
-        let window = |key: &str, label| {
+        let window = |key: &str, positional| {
             let window = body.pointer(&format!("/rate_limit/{key}"))?;
+            let label = window
+                .get("limit_window_seconds")
+                .and_then(Value::as_u64)
+                .and_then(window_label)
+                .unwrap_or(positional);
             Some(Window {
                 label,
                 percent: window.get("used_percent")?.as_f64()?,
@@ -182,6 +191,18 @@ fn local_clock(at: u64, now: u64) -> Option<String> {
 #[cfg(not(unix))]
 fn local_clock(_at: u64, _now: u64) -> Option<String> {
     None
+}
+
+/// A label is `&'static str`, so only the durations Codex actually bills in
+/// are named; anything else falls back to the caller's positional guess.
+fn window_label(seconds: u64) -> Option<&'static str> {
+    Some(match seconds {
+        18_000 => "5h",
+        86_400 => "day",
+        604_800 => "week",
+        2_592_000 => "month",
+        _ => return None,
+    })
 }
 
 pub fn now() -> u64 {
@@ -454,6 +475,26 @@ mod tests {
             Some(Pace::TooEarly)
         );
         assert_eq!(week(100.0, day).pace(1_000_000), None);
+    }
+
+    #[test]
+    fn codex_window_is_labelled_by_its_duration_not_its_slot() {
+        // A Pro account: the seven-day window arrives in the primary slot,
+        // which the positional labels would have reported as "5h".
+        let usage = Usage::parse_codex(&json!({
+            "plan_type": "prolite",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 4,
+                    "limit_window_seconds": 604_800,
+                    "reset_at": 1_792_363_618,
+                },
+                "secondary_window": null,
+            },
+        }))
+        .unwrap();
+        assert_eq!(usage.windows.len(), 1);
+        assert_eq!(usage.summary(0), ("codex week 4%".into(), false));
     }
 
     #[test]
