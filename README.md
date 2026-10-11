@@ -77,6 +77,8 @@ own interface.
   both via [session-migrate](https://session-migrate.github.io/).
 - **OpenCode sessions outlive the dashboard**, and Cursor chats show live state
   on every platform.
+- **Per-project OpenCode models:** choose `Default` in the model picker to use
+  the launch folder's OpenCode config or plugin rules. Explicit model picks override them.
 - **Fast with big histories.** Refreshes run in the background, so typing and
   arrows never wait on a harness. Where a harness's own CLI is slow to start,
   agentview reads its data directly instead: an OpenCode refresh over a 17 GB
