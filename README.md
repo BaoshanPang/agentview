@@ -85,6 +85,8 @@ own interface.
   history takes about 0.1 s, and Cursor about 3 ms.
 - **Light and dark themes** that follow the terminal and the OS. Force one with
   `--theme`.
+- **Subscription usage at a glance:** Claude and Codex percentages share a
+  dedicated header row, even when a limit is hit. `/usage` shows every window and reset.
 - **`Ctrl+X` twice** stops and hides or deletes a session, no dialog.
 
 ### Refresh time by harness

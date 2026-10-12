@@ -107,15 +107,14 @@ pub fn terminal_title(app: &App) -> String {
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let cwd = header_directory(app);
     let awaiting = app.session_count(SessionState::NeedsInput);
     let working =
         app.session_count(SessionState::ReadyForReview) + app.session_count(SessionState::Working);
     let completed = app.session_count(SessionState::Completed);
     let mut completed_status = if app.includes_completed {
-        format!("{completed} completed (/completed hide)")
+        format!("{completed} done")
     } else {
-        "completed hidden (/completed show)".into()
+        "done hidden".into()
     };
     if app.includes_completed
         && app
@@ -124,14 +123,9 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .iter()
             .any(|warning| is_history_cap_warning(warning))
     {
-        completed_status.push_str(" · history capped");
+        completed_status.push('+');
     }
-    let providers = provider_summary(app);
     let title = format!("agentview v{}", env!("CARGO_PKG_VERSION"));
-    let mode = match app.view_mode {
-        ViewMode::Status => "status",
-        ViewMode::Directory => "directory",
-    };
 
     let lines = if area.height <= 2 {
         vec![
@@ -163,17 +157,11 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Span::styled("  ○ ", ring),
                 Span::styled("●", core),
                 Span::styled(" ○  ", ring),
-                Span::styled(
-                    format!("{providers} · {cwd}{}", next_launch_label(app)),
-                    Style::default().fg(palette().dim),
-                ),
             ]),
             Line::from(vec![
                 Span::styled("   ○ ○   ", ring),
                 Span::styled(
-                    format!(
-                        "{awaiting} awaiting input · {working} working · {completed_status} · {mode} view"
-                    ),
+                    format!("{awaiting} awaiting · {working} working · {completed_status}"),
                     Style::default().fg(palette().dim),
                 ),
             ]),
@@ -194,10 +182,7 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 title,
                 Style::default().add_modifier(Modifier::BOLD),
             )),
-            Line::from(Span::styled(
-                format!("{providers} · {cwd}"),
-                Style::default().fg(palette().dim),
-            )),
+            Line::from(""),
             Line::from(Span::styled(
                 format!("{awaiting} awaiting · {working} working · {completed_status}"),
                 Style::default().fg(palette().dim),
@@ -917,9 +902,15 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-/// Right end of the header's title row, which is otherwise empty.
+/// Dedicated subscription row; very short terminals share the title row.
 fn render_usage(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    const TITLE_ROOM: usize = 30;
+    let title_room = if area.height <= 2 {
+        30
+    } else if area.width >= 70 {
+        9
+    } else {
+        0
+    };
     const SEPARATOR: &str = "  │  ";
     const HINT: &str = "  /usage";
     let now = crate::usage::now();
@@ -936,13 +927,20 @@ fn render_usage(frame: &mut Frame<'_>, app: &App, area: Rect) {
             + display_width(SEPARATOR) * entries.len().saturating_sub(1)
             + 1
     };
-    while !entries.is_empty() && TITLE_ROOM + line_width(&entries) > usize::from(area.width) {
+    if title_room + line_width(&entries) > usize::from(area.width) {
+        for (text, _) in &mut entries {
+            if let Some(index) = text.find(" (") {
+                text.truncate(index);
+            }
+        }
+    }
+    while !entries.is_empty() && title_room + line_width(&entries) > usize::from(area.width) {
         entries.pop();
     }
     if area.height == 0 || entries.is_empty() {
         return;
     }
-    let hint = TITLE_ROOM + line_width(&entries) + display_width(HINT) <= usize::from(area.width);
+    let hint = title_room + line_width(&entries) + display_width(HINT) <= usize::from(area.width);
     let hint = if hint { HINT } else { "" };
     let width = line_width(&entries) + display_width(hint);
     let spans = entries
@@ -963,7 +961,12 @@ fn render_usage(frame: &mut Frame<'_>, app: &App, area: Rect) {
     frame.render_widget(
         Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().bg)),
         Rect {
-            x: area.x + area.width - width as u16,
+            x: if area.height <= 2 {
+                area.x + area.width - width as u16
+            } else {
+                area.x + title_room as u16
+            },
+            y: area.y + u16::from(area.height > 2),
             width: width as u16,
             height: 1,
             ..area
@@ -1087,7 +1090,7 @@ fn render_usage_popup(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-/// The header already reports these as "history capped".
+/// The header marks capped history with a trailing plus on the done count.
 fn is_history_cap_warning(warning: &str) -> bool {
     warning.contains("history is limited")
 }
@@ -2167,29 +2170,6 @@ fn render_confirmation(frame: &mut Frame<'_>, _: &App, target: &ConfirmTarget, a
     );
 }
 
-/// What a new task would start with, when a model was chosen: Ctrl+B
-/// switches it from the list, so it is shown there too.
-fn next_launch_label(app: &App) -> String {
-    match &app.launch_model {
-        Some(model) if app.launch_provider != Provider::Terminal => {
-            format!(
-                " · new: {} {}",
-                app.launch_provider.label(),
-                sanitize_inline(model)
-            )
-        }
-        _ => String::new(),
-    }
-}
-
-fn provider_summary(app: &App) -> String {
-    if app.provider_labels().is_empty() {
-        "Coding agents".into()
-    } else {
-        sanitize_inline(&app.provider_labels().join(" + "))
-    }
-}
-
 fn styled_line(spans: Vec<Span<'static>>, selected: bool) -> Line<'static> {
     let style = if selected {
         Style::default()
@@ -2338,13 +2318,6 @@ fn sanitize_multiline(input: &str) -> String {
         .collect()
 }
 
-fn header_directory(app: &App) -> String {
-    app.launch_directory()
-        .or_else(|| std::env::current_dir().ok())
-        .map(|path| sanitize_inline(&abbreviate_path(&path)))
-        .unwrap_or_else(|| "unknown directory".into())
-}
-
 fn launch_directory_name(app: &App) -> String {
     app.launch_directory()
         .or_else(|| std::env::current_dir().ok())
@@ -2439,7 +2412,7 @@ mod tests {
         assert!(rendered.contains("Working"));
         assert!(rendered.contains("Completed"));
         assert!(rendered.contains("describe a task · /help for commands"));
-        assert!(rendered.contains("1 awaiting input · 2 working · 1 completed"));
+        assert!(rendered.contains("1 awaiting · 2 working · 1 done"));
     }
 
     #[test]
@@ -2538,9 +2511,12 @@ mod tests {
         terminal.draw(|frame| render(frame, &app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer());
 
-        assert!(rendered.contains("completed hidden"));
-        assert!(!rendered.contains("0 completed"));
-        assert!(rendered.contains("/completed show"));
+        assert!(rendered.contains("done hidden"));
+        assert!(!rendered.contains("0 done"));
+        assert!(!rendered
+            .lines()
+            .take(4)
+            .any(|line| line.contains("/completed show")));
     }
 
     #[test]
@@ -2579,7 +2555,7 @@ mod tests {
     }
 
     #[test]
-    fn row_names_provider_and_peek_shows_full_runtime() {
+    fn single_provider_row_is_compact_and_peek_shows_full_runtime() {
         let mut item = session("worker", SessionState::Working);
         item.provider = Provider::Codex;
         item.runtime = Runtime::Docker {
@@ -2596,7 +2572,6 @@ mod tests {
 
         terminal.draw(|frame| render(frame, &app)).unwrap();
         let row = buffer_text(terminal.backend().buffer());
-        assert!(row.contains("Codex"));
         assert!(!row.contains("X@D"));
         assert!(row.contains("latest summary from worker"));
         assert!(!row.contains("long-container-name-that-must-not-shrink-the-row"));
@@ -3145,7 +3120,7 @@ mod tests {
     }
 
     #[test]
-    fn directory_view_header_tracks_the_selected_project() {
+    fn directory_view_shows_the_project_only_in_the_list() {
         let mut item = session("worker", SessionState::Working);
         let (worktree, project) = if cfg!(windows) {
             (
@@ -3170,7 +3145,7 @@ mod tests {
         terminal.draw(|frame| render(frame, &app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer());
 
-        assert!(rendered.contains(&format!("Claude · {project}")));
+        assert!(!rendered.lines().take(4).any(|line| line.contains(project)));
         assert!(rendered.contains(project));
         assert!(!rendered.contains(".claude/worktrees"));
     }
@@ -3219,23 +3194,23 @@ mod tests {
     }
 
     #[test]
-    fn header_shows_one_usage_entry_per_provider_and_drops_extras_when_narrow() {
+    fn header_keeps_both_providers_visible_when_claude_is_exhausted() {
         let usage = |provider, percent| crate::usage::Usage {
             provider,
             windows: vec![crate::usage::Window {
                 label: "5h",
                 percent,
-                resets_at: None,
+                resets_at: Some(crate::usage::now() + 100_000),
             }],
         };
         let mut app = App::new(SessionSnapshot::default());
-        app.usage = vec![usage("claude", 38.0), usage("codex", 4.0)];
+        app.usage = vec![usage("claude", 100.0), usage("codex", 4.0)];
         let first_row = |width| {
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal.draw(|frame| render(frame, &app)).unwrap();
             buffer_text(terminal.backend().buffer())
                 .lines()
-                .next()
+                .nth(1)
                 .unwrap()
                 .trim_end()
                 .to_owned()
@@ -3243,11 +3218,14 @@ mod tests {
 
         let wide = first_row(100);
         assert!(
-            wide.ends_with("claude 5h 38%  │  codex 5h 4%  /usage"),
+            wide.contains("claude 5h 100% (") && wide.ends_with("codex 5h 4%  /usage"),
             "{wide}"
         );
         let narrow = first_row(50);
-        assert!(narrow.ends_with("claude 5h 38%"), "{narrow}");
+        assert!(
+            narrow.contains("claude 5h 100%") && narrow.contains("codex 5h 4%"),
+            "{narrow}"
+        );
     }
 
     #[test]

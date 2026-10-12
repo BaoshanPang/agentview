@@ -533,7 +533,7 @@ fn all_supported_providers_coexist_in_one_real_terminal() {
 
     app.send(CTRL_S);
     let directory = app.wait_for("Copilot directory view", |screen| {
-        screen.contains("directory view") && screen.contains("/workspace/copilot-project")
+        screen.contains("/workspace/copilot-project") && !screen.contains("Ready for review")
     });
     assert_lines_fit(&directory, 150);
     app.exit_cleanly();
@@ -1294,9 +1294,7 @@ fn terminal_harness_backgrounds_resumes_stops_then_deletes_in_a_real_pty() {
     });
     app.send(SHIFT_LEFT);
     app.wait_for("backgrounded Terminal row", |screen| {
-        screen.contains("release shell")
-            && screen.contains("Terminal")
-            && screen.contains("Interactive shell")
+        screen.contains("release shell") && screen.contains("Interactive shell")
     });
 
     app.send(ENTER);
@@ -2011,7 +2009,7 @@ fn completed_history_is_visible_by_default_and_stays_responsive() {
     let startup = Instant::now();
 
     let screen = app.wait_for("default bounded completed history", |screen| {
-        screen.contains("1000 completed (/completed hide)")
+        screen.contains("1000 done")
             && screen.contains("completed-session-0000")
             && screen.contains("completed-session-0022")
             && screen.contains("Show 23 more · 977 hidden")
@@ -2066,14 +2064,13 @@ fn completed_history_is_visible_by_default_and_stays_responsive() {
     app.send(b"/completed hide");
     app.send(ENTER);
     app.wait_for("in-dashboard completed history disable", |screen| {
-        screen.contains("completed hidden (/completed show)")
-            && !screen.contains("completed-session-0000")
+        screen.contains("done hidden") && !screen.contains("completed-session-0000")
     });
 
     app.send(b"/completed show");
     app.send(ENTER);
     app.wait_for("in-dashboard completed history restore", |screen| {
-        screen.contains("1000 completed (/completed hide)")
+        screen.contains("1000 done")
             && screen.contains("completed-session-0000")
             && screen.contains("Show 23 more · 977 hidden")
     });
@@ -2126,15 +2123,13 @@ elif "models" in sys.argv:
     });
 
     app.wait_for("active-only OpenCode startup", |screen| {
-        screen.contains("completed hidden") && screen.contains("restart without --hide-completed")
+        screen.contains("done hidden") && screen.contains("restart without --hide-completed")
     });
     let started = Instant::now();
     app.send(b"/completed show");
     app.send(ENTER);
     let shown = app.wait_for("bounded OpenCode history", |screen| {
-        screen.contains("10 completed (/completed hide)")
-            && screen.contains("bounded history")
-            && screen.contains("history capped")
+        screen.contains("10 done+") && screen.contains("bounded history")
     });
     assert!(
         started.elapsed() < Duration::from_secs(2),
@@ -2144,7 +2139,7 @@ elif "models" in sys.argv:
 
     app.send(DOWN);
     let navigated = app.wait_for("bounded history stays in the header only", |screen| {
-        screen.contains("history capped") && screen.contains("enter to open")
+        screen.contains("done+") && screen.contains("enter to open")
     });
     assert!(!navigated.contains("history is limited to 10 records"));
     app.send(UP);
@@ -2222,7 +2217,7 @@ fn real_host_auto_resolves_harnesses_models_and_bounded_history() {
     app.send(b"/completed show");
     app.send(ENTER);
     app.wait_for("real bounded completed history", |screen| {
-        screen.contains("completed (/completed hide)") && screen.contains("history capped")
+        screen.contains("done+")
     });
     assert!(started.elapsed() < Duration::from_secs(4));
     app.send(DOWN);
@@ -2492,8 +2487,7 @@ fn owned_dashboard_never_starts_opencode_external_history_query_even_when_comple
     let startup = Instant::now();
 
     app.wait_for("OpenCode history-free default startup", |screen| {
-        screen.contains("0 completed (/completed hide)")
-            && !screen.contains("loading provider sessions")
+        screen.contains("0 done") && !screen.contains("loading provider sessions")
     });
 
     assert!(
@@ -2519,9 +2513,7 @@ fn wide_real_tty_exercises_primary_interactions_and_restores_terminal() {
             && screen.contains("schema-migration")
             && screen.contains("release-reviewer")
             && screen.contains("Unknown")
-            && screen.contains(
-                "2 awaiting input · 4 working · 2 completed (/completed hide) · status view",
-            )
+            && screen.contains("2 awaiting · 4 working · 2 done")
     });
     assert_lines_fit(&startup, 120);
     assert!(startup.contains("release-reviewer"));
@@ -2529,8 +2521,7 @@ fn wide_real_tty_exercises_primary_interactions_and_restores_terminal() {
 
     app.send(b"?");
     let help = app.wait_for("contextual help", |screen| {
-        screen.contains("shortcuts")
-            && has_help_entry(screen, "ctrl+s", "switch view")
+        has_help_entry(screen, "ctrl+s", "switch view")
             && has_help_entry(screen, "space", "inspect")
             && screen.contains("? to close")
     });
@@ -2540,14 +2531,13 @@ fn wide_real_tty_exercises_primary_interactions_and_restores_terminal() {
 
     app.send(CTRL_S);
     let directory = app.wait_for("directory view", |screen| {
-        screen.contains("directory view")
-            && screen.contains("/workspace/alpha")
+        screen.contains("/workspace/alpha")
             && screen.contains("/workspace/beta")
             && screen.contains("Review · Prepared the release notes")
     });
     assert_lines_fit(&directory, 120);
     app.send(CTRL_S);
-    app.wait_for("status view", |screen| screen.contains("status view"));
+    app.wait_for("status view", |screen| screen.contains("Ready for review"));
 
     app.send(CTRL_F);
     app.wait_for("filter composer", |screen| {
@@ -2939,7 +2929,7 @@ fn narrow_and_tiny_real_ttys_have_bounded_fallback_layouts() {
     let expected_version = format!("agentview v{}", env!("CARGO_PKG_VERSION"));
     let startup = narrow.wait_for("narrow startup", |screen| {
         screen.contains(&expected_version)
-            && screen.contains("2 awaiting · 4 working · 2 completed")
+            && screen.contains("2 awaiting · 4 working · 2 done")
             && screen.contains("release-reviewer")
             && screen.contains("? shortcuts")
             && !screen.contains("status view")
@@ -2949,9 +2939,7 @@ fn narrow_and_tiny_real_ttys_have_bounded_fallback_layouts() {
 
     narrow.send(b"?");
     let help = narrow.wait_for("wrapped narrow help", |screen| {
-        screen.contains("shortcuts")
-            && has_help_entry(screen, "ctrl+s", "switch view")
-            && screen.contains("? to close")
+        has_help_entry(screen, "ctrl+s", "switch view") && screen.contains("? to close")
     });
     assert_lines_fit(&help, 55);
     narrow.send(b"?");
@@ -2996,8 +2984,7 @@ fn vscode_wide_terminal_help_preserves_visual_line_breaks() {
 
     app.send(b"?");
     let help = app.wait_for("VS Code-style multiline shortcuts", |screen| {
-        screen.contains("shortcuts")
-            && has_help_entry(screen, "ctrl+s", "switch view")
+        has_help_entry(screen, "ctrl+s", "switch view")
             && has_help_entry(screen, "ctrl+f", "filter sessions")
             && has_help_entry(screen, "/login", "open native setup")
             && screen.contains("? to close")

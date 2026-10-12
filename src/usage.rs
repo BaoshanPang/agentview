@@ -93,10 +93,13 @@ impl Usage {
         if let Some(window) = blocked {
             let resets = window
                 .resets_at
-                .map(|at| format!(" · resets in {}", countdown(at.saturating_sub(now))))
+                .map(|at| format!(" ({} reset)", countdown(at.saturating_sub(now))))
                 .unwrap_or_default();
             return (
-                format!("{} {} limit hit{resets}", self.provider, window.label),
+                format!(
+                    "{} {} {:.0}%{resets}",
+                    self.provider, window.label, window.percent
+                ),
                 true,
             );
         }
@@ -409,7 +412,7 @@ mod tests {
         let now = parse_rfc3339("2026-10-05T13:09:59Z").unwrap();
         assert_eq!(
             usage.summary(now),
-            ("claude week limit hit · resets in 19h 50m".into(), true)
+            ("claude week 100% (19h 50m reset)".into(), true)
         );
     }
 
