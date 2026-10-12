@@ -1,0 +1,49 @@
+name: OpenCode move regression
+
+on:
+  push:
+    paths:
+      - 'src/**'
+      - 'tests/opencode_move.rs'
+      - 'tests/real_tty.rs'
+      - 'Cargo.*'
+      - '.github/workflows/opencode-move.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/opencode_move.rs'
+      - 'tests/real_tty.rs'
+      - 'Cargo.*'
+      - '.github/workflows/opencode-move.yml'
+  schedule:
+    # Catch upstream CLI changes even when agentview itself has not changed.
+    - cron: '10 9 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-move:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Install the current OpenCode CLI
+        run: |
+          npm install --prefix "$RUNNER_TEMP/opencode-cli" opencode-ai@latest
+          CLI="$RUNNER_TEMP/opencode-cli/node_modules/.bin/opencode"
+          "$CLI" --version
+          echo "AGENTVIEW_REAL_OPENCODE_BIN=$CLI" >> "$GITHUB_ENV"
+      - name: Move a large native session three times without session-migrate
+        run: cargo test --locked --test opencode_move -- --ignored --nocapture
+      - name: Check the dashboard keeps the moved session visible
+        run: cargo test --locked --test real_tty opencode_move_keeps_the_same_row_and_never_hides_its_history
