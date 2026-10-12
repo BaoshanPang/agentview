@@ -53,7 +53,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
             .min(area.height.saturating_sub(5)),
         _ => 3,
     };
-    let header_height = if area.height < 16 { 2 } else { 5 };
+    let header_height = if area.height < 16 { 2 } else { 4 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -107,24 +107,6 @@ pub fn terminal_title(app: &App) -> String {
 }
 
 fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let awaiting = app.session_count(SessionState::NeedsInput);
-    let working =
-        app.session_count(SessionState::ReadyForReview) + app.session_count(SessionState::Working);
-    let completed = app.session_count(SessionState::Completed);
-    let mut completed_status = if app.includes_completed {
-        format!("{completed} done")
-    } else {
-        "done hidden".into()
-    };
-    if app.includes_completed
-        && app
-            .snapshot
-            .warnings
-            .iter()
-            .any(|warning| is_history_cap_warning(warning))
-    {
-        completed_status.push('+');
-    }
     let title = format!("agentview v{}", env!("CARGO_PKG_VERSION"));
 
     let lines = if area.height <= 2 {
@@ -139,9 +121,7 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
-            Line::from(format!(
-                "{awaiting} awaiting · {working} working · {completed_status}"
-            )),
+            Line::default(),
         ]
     } else if area.width >= 70 {
         let ring = Style::default().fg(palette().dim);
@@ -159,13 +139,6 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Span::styled(" ○  ", ring),
             ]),
             Line::from(Span::styled("   ○ ○   ", ring)),
-            Line::from(vec![
-                Span::raw("         "),
-                Span::styled(
-                    format!("{awaiting} awaiting · {working} working · {completed_status}"),
-                    Style::default().fg(palette().dim),
-                ),
-            ]),
             Line::from(Span::styled(
                 if app.yolo {
                     "         ⚠ YOLO MODE · native permission safeguards are relaxed"
@@ -185,10 +158,6 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
             )),
             Line::from(""),
             Line::default(),
-            Line::from(Span::styled(
-                format!("{awaiting} awaiting · {working} working · {completed_status}"),
-                Style::default().fg(palette().dim),
-            )),
             Line::from(Span::styled(
                 if app.yolo {
                     "⚠ YOLO · permission safeguards relaxed"
@@ -904,7 +873,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-/// Two concise subscription rows; very short terminals keep only session counts.
+/// Two concise subscription rows; very short terminals keep only the title.
 fn render_usage(frame: &mut Frame<'_>, app: &App, area: Rect) {
     if area.height <= 2 {
         return;
@@ -2449,7 +2418,7 @@ mod tests {
         assert!(rendered.contains("Working"));
         assert!(rendered.contains("Completed"));
         assert!(rendered.contains("describe a task · /help for commands"));
-        assert!(rendered.contains("1 awaiting · 2 working · 1 done"));
+        assert!(!rendered.contains("awaiting"));
     }
 
     #[test]
@@ -2534,7 +2503,7 @@ mod tests {
     }
 
     #[test]
-    fn header_makes_default_completed_filter_explicit() {
+    fn header_omits_session_count_and_filter_status() {
         let app = App::with_completed_visibility(
             SessionSnapshot {
                 sessions: vec![],
@@ -2548,7 +2517,7 @@ mod tests {
         terminal.draw(|frame| render(frame, &app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer());
 
-        assert!(rendered.contains("done hidden"));
+        assert!(!rendered.contains("done hidden"));
         assert!(!rendered.contains("0 done"));
         assert!(!rendered
             .lines()
@@ -3267,7 +3236,7 @@ mod tests {
     }
 
     #[test]
-    fn header_shows_all_rate_windows_on_two_lines_above_session_counts() {
+    fn header_shows_all_rate_windows_on_two_lines_without_session_counts() {
         let now = crate::usage::now();
         let mut app = App::new(SessionSnapshot::default());
         app.usage = vec!["claude", "codex"]
@@ -3310,10 +3279,7 @@ mod tests {
                     );
                 }
             }
-            assert!(
-                lines[3].contains("0 awaiting · 0 working · 0 done"),
-                "{text}"
-            );
+            assert!(!text.contains("awaiting"), "{text}");
         }
     }
 

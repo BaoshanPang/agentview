@@ -1124,7 +1124,7 @@ pub fn run_dashboard(
 }
 
 fn session_page_size_for_terminal(height: u16) -> usize {
-    let header_height = if height < 16 { 2 } else { 5 };
+    let header_height = if height < 16 { 2 } else { 4 };
     let list_height = height.saturating_sub(header_height + 3 + 1);
     // Reserve a heading, a Show-more row, and a little separation so the
     // pagination control does not start just below the viewport.
@@ -2776,10 +2776,10 @@ mod tests {
     #[test]
     fn terminal_height_keeps_the_show_more_control_in_view() {
         assert_eq!(session_page_size_for_terminal(8), 1);
-        assert_eq!(session_page_size_for_terminal(18), 6);
-        assert_eq!(session_page_size_for_terminal(28), 16);
-        assert_eq!(session_page_size_for_terminal(34), 22);
-        assert_eq!(session_page_size_for_terminal(37), SESSION_PAGE_SIZE);
+        assert_eq!(session_page_size_for_terminal(18), 7);
+        assert_eq!(session_page_size_for_terminal(28), 17);
+        assert_eq!(session_page_size_for_terminal(34), 23);
+        assert_eq!(session_page_size_for_terminal(36), SESSION_PAGE_SIZE);
         assert_eq!(session_page_size_for_terminal(u16::MAX), SESSION_PAGE_SIZE);
     }
 
