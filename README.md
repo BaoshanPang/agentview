@@ -77,8 +77,6 @@ own interface.
   both via [session-migrate](https://session-migrate.github.io/).
 - **OpenCode sessions outlive the dashboard**, and Cursor chats show live state
   on every platform.
-- **OpenCode context stays visible:** each row shows the current model and the
-  latest completed turn's context size, so an expensive long session stands out.
 - **Per-project OpenCode models:** choose `Default` in the model picker to use
   the launch folder's OpenCode config or plugin rules. Explicit model picks override them.
 - **Fast with big histories.** Refreshes run in the background, so typing and
@@ -87,8 +85,8 @@ own interface.
   history takes about 0.1 s, and Cursor about 3 ms.
 - **Light and dark themes** that follow the terminal and the OS. Force one with
   `--theme`.
-- **Subscription usage at a glance:** Claude and Codex percentages share a
-  dedicated header row, even when a limit is hit. `/usage` shows every window and reset.
+- **Subscription usage at a glance:** two concise header lines show Claude and
+  Codex rate-limit windows, resets, and pace when space allows. `/usage` shows the full breakdown.
 - **`Ctrl+X` twice** stops and hides or deletes a session, no dialog.
 
 ### Refresh time by harness

@@ -96,11 +96,6 @@ Each non-empty line must be an exact `provider_id/model_id` identifier. agentvie
 keeps the first slash as the provider/model boundary, so routed model IDs such
 as `openrouter/vendor/model` remain intact.
 
-The dashboard also reads the latest completed assistant message's model and
-`tokens.total` from OpenCode's database. It prefixes the session summary with
-that current context size and model (for example, `151k context · gpt-5.6-sol`),
-so long-running sessions are visible before they reach automatic compaction.
-
 For an agentview-owned server session, the selected identifier is sent in the
 documented asynchronous message body:
 

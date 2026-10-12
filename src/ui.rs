@@ -53,7 +53,7 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
             .min(area.height.saturating_sub(5)),
         _ => 3,
     };
-    let header_height = if area.height < 16 { 2 } else { 4 };
+    let header_height = if area.height < 16 { 2 } else { 5 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -158,6 +158,7 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Span::styled("●", core),
                 Span::styled(" ○  ", ring),
             ]),
+            Line::default(),
             Line::from(vec![
                 Span::styled("   ○ ○   ", ring),
                 Span::styled(
@@ -183,6 +184,7 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Style::default().add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
+            Line::default(),
             Line::from(Span::styled(
                 format!("{awaiting} awaiting · {working} working · {completed_status}"),
                 Style::default().fg(palette().dim),
@@ -902,76 +904,85 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-/// Dedicated subscription row; very short terminals share the title row.
+/// Two concise subscription rows; very short terminals keep only session counts.
 fn render_usage(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let title_room = if area.height <= 2 {
-        30
-    } else if area.width >= 70 {
-        9
-    } else {
-        0
-    };
-    const SEPARATOR: &str = "  │  ";
-    const HINT: &str = "  /usage";
-    let now = crate::usage::now();
-    let mut entries = app
-        .usage
-        .iter()
-        .map(|usage| usage.summary(now))
-        .collect::<Vec<_>>();
-    let line_width = |entries: &[(String, bool)]| {
-        entries
-            .iter()
-            .map(|(text, _)| display_width(text))
-            .sum::<usize>()
-            + display_width(SEPARATOR) * entries.len().saturating_sub(1)
-            + 1
-    };
-    if title_room + line_width(&entries) > usize::from(area.width) {
-        for (text, _) in &mut entries {
-            if let Some(index) = text.find(" (") {
-                text.truncate(index);
-            }
-        }
-    }
-    while !entries.is_empty() && title_room + line_width(&entries) > usize::from(area.width) {
-        entries.pop();
-    }
-    if area.height == 0 || entries.is_empty() {
+    if area.height <= 2 {
         return;
     }
-    let hint = title_room + line_width(&entries) + display_width(HINT) <= usize::from(area.width);
-    let hint = if hint { HINT } else { "" };
-    let width = line_width(&entries) + display_width(hint);
-    let spans = entries
-        .into_iter()
-        .enumerate()
-        .flat_map(|(index, (text, alert))| {
-            let style = Style::default().fg(if alert {
+    let indent = if area.width >= 70 { 9 } else { 0 };
+    let width = area.width.saturating_sub(indent);
+    let now = crate::usage::now();
+    for (row, usage) in app.usage.iter().take(2).enumerate() {
+        // Keep every window visible; drop projections, then reset details
+        // only when the terminal cannot fit them.
+        let text = (0..3)
+            .map(|detail| {
+                let windows = usage
+                    .windows
+                    .iter()
+                    .map(|window| {
+                        let mut text = format!("{} {:.0}%", window.label, window.percent);
+                        if detail < 2 {
+                            if let Some((reset, _)) = window.reset_parts(now) {
+                                text.push_str(&format!(" · resets {reset}"));
+                            }
+                        }
+                        if detail == 0 {
+                            match window.pace(now) {
+                                Some(Pace::AtReset(percent)) => {
+                                    text.push_str(&format!(" · ~{percent:.0}% by reset"))
+                                }
+                                Some(Pace::HitsLimit(at)) => text.push_str(&format!(
+                                    " · full {}",
+                                    crate::usage::Window::when(at, now)
+                                )),
+                                _ => {}
+                            }
+                        }
+                        text
+                    })
+                    .collect::<Vec<_>>()
+                    .join("  │  ");
+                format!("{:<7} {windows}", usage.provider)
+            })
+            .find(|text| display_width(text) <= usize::from(width))
+            .unwrap_or_else(|| {
+                format!(
+                    "{} {}",
+                    usage.provider,
+                    usage
+                        .windows
+                        .iter()
+                        .map(|w| format!("{} {:.0}%", w.label, w.percent))
+                        .collect::<Vec<_>>()
+                        .join(" · ")
+                )
+            });
+        let alert = usage.windows.iter().any(|w| w.percent >= 90.0);
+        let mut spans = vec![Span::styled(
+            text,
+            Style::default().fg(if alert {
                 palette().attention
             } else {
                 palette().dim
-            });
-            let separator =
-                (index > 0).then(|| Span::styled(SEPARATOR, Style::default().fg(palette().dim)));
-            separator.into_iter().chain([Span::styled(text, style)])
-        })
-        .chain([Span::styled(hint, Style::default().fg(palette().accent))])
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().bg)),
-        Rect {
-            x: if area.height <= 2 {
-                area.x + area.width - width as u16
-            } else {
-                area.x + title_room as u16
+            }),
+        )];
+        if row == 0 && spans[0].width() + 8 <= usize::from(width) {
+            spans.push(Span::styled(
+                "  /usage",
+                Style::default().fg(palette().accent),
+            ));
+        }
+        frame.render_widget(
+            Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().bg)),
+            Rect {
+                x: area.x + indent,
+                y: area.y + 1 + row as u16,
+                width,
+                height: 1,
             },
-            y: area.y + u16::from(area.height > 2),
-            width: width as u16,
-            height: 1,
-            ..area
-        },
-    );
+        );
+    }
 }
 
 fn render_usage_popup(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -3205,27 +3216,77 @@ mod tests {
         };
         let mut app = App::new(SessionSnapshot::default());
         app.usage = vec![usage("claude", 100.0), usage("codex", 4.0)];
-        let first_row = |width| {
+        let header = |width| {
             let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
             terminal.draw(|frame| render(frame, &app)).unwrap();
             buffer_text(terminal.backend().buffer())
                 .lines()
-                .nth(1)
-                .unwrap()
-                .trim_end()
-                .to_owned()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join("\n")
         };
 
-        let wide = first_row(100);
+        let wide = header(100);
         assert!(
-            wide.contains("claude 5h 100% (") && wide.ends_with("codex 5h 4%  /usage"),
+            wide.contains("claude  5h 100% · resets") && wide.contains("codex   5h 4% · resets"),
             "{wide}"
         );
-        let narrow = first_row(50);
+        let narrow = header(50);
         assert!(
-            narrow.contains("claude 5h 100%") && narrow.contains("codex 5h 4%"),
+            narrow.contains("claude  5h 100%") && narrow.contains("codex   5h 4%"),
             "{narrow}"
         );
+    }
+
+    #[test]
+    fn header_shows_all_rate_windows_on_two_lines_above_session_counts() {
+        let now = crate::usage::now();
+        let mut app = App::new(SessionSnapshot::default());
+        app.usage = vec!["claude", "codex"]
+            .into_iter()
+            .map(|provider| crate::usage::Usage {
+                provider,
+                windows: vec![
+                    crate::usage::Window {
+                        label: "5h",
+                        percent: 60.0,
+                        resets_at: Some(now + 8100),
+                    },
+                    crate::usage::Window {
+                        label: "week",
+                        percent: 4.0,
+                        resets_at: Some(now + 345600),
+                    },
+                ],
+            })
+            .collect();
+        for width in [50, 80, 160] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+            let text = buffer_text(terminal.backend().buffer());
+            let lines = text.lines().collect::<Vec<_>>();
+            for (row, provider) in [(1, "claude"), (2, "codex")] {
+                assert!(
+                    lines[row].contains(provider)
+                        && lines[row].contains("5h 60%")
+                        && lines[row].contains("week 4%"),
+                    "{text}"
+                );
+                if width >= 80 {
+                    assert!(lines[row].contains("resets"), "{text}");
+                }
+                if width == 160 {
+                    assert!(
+                        lines[row].contains("full") && lines[row].contains("by reset"),
+                        "{text}"
+                    );
+                }
+            }
+            assert!(
+                lines[3].contains("0 awaiting · 0 working · 0 done"),
+                "{text}"
+            );
+        }
     }
 
     #[test]

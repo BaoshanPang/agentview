@@ -32,7 +32,7 @@ use crate::process::{CancellableProcessRunner, CommandRequest, CommandRunner};
 // running turn rather than as rows of their own. `last` is the newest message,
 // read through the (session_id, time_created) index, which live state needs;
 // `child` is when the newest unfinished turn of a subagent session began.
-const GLOBAL_SESSION_ROWS: &str = "SELECT json_object('id', s.id, 'title', s.title, 'created', s.time_created, 'updated', s.time_updated, 'projectId', s.project_id, 'directory', s.directory, 'last', json((SELECT json_object('role', json_extract(m.data, '$.role'), 'created', m.time_created, 'completed', json_extract(m.data, '$.time.completed'), 'question', EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id AND json_extract(p.data, '$.tool') = 'question' AND json_extract(p.data, '$.state.status') IN ('pending', 'running'))) FROM message m WHERE m.session_id = s.id ORDER BY m.time_created DESC, m.id DESC LIMIT 1)), 'context', json((SELECT json_object('model', json_extract(m.data, '$.modelID'), 'tokens', json_extract(m.data, '$.tokens.total')) FROM message m WHERE m.session_id = s.id AND json_extract(m.data, '$.role') = 'assistant' AND json_extract(m.data, '$.time.completed') IS NOT NULL ORDER BY m.time_created DESC, m.id DESC LIMIT 1)), 'child', (SELECT MAX(m.time_created) FROM session c JOIN message m ON m.id = (SELECT m2.id FROM message m2 WHERE m2.session_id = c.id ORDER BY m2.time_created DESC, m2.id DESC LIMIT 1) WHERE c.parent_id = s.id AND (json_extract(m.data, '$.role') = 'user' OR json_extract(m.data, '$.time.completed') IS NULL))) AS record FROM session s WHERE s.parent_id IS NULL";
+const GLOBAL_SESSION_ROWS: &str = "SELECT json_object('id', s.id, 'title', s.title, 'created', s.time_created, 'updated', s.time_updated, 'projectId', s.project_id, 'directory', s.directory, 'last', json((SELECT json_object('role', json_extract(m.data, '$.role'), 'created', m.time_created, 'completed', json_extract(m.data, '$.time.completed'), 'question', EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id AND json_extract(p.data, '$.tool') = 'question' AND json_extract(p.data, '$.state.status') IN ('pending', 'running'))) FROM message m WHERE m.session_id = s.id ORDER BY m.time_created DESC, m.id DESC LIMIT 1)), 'child', (SELECT MAX(m.time_created) FROM session c JOIN message m ON m.id = (SELECT m2.id FROM message m2 WHERE m2.session_id = c.id ORDER BY m2.time_created DESC, m2.id DESC LIMIT 1) WHERE c.parent_id = s.id AND (json_extract(m.data, '$.role') = 'user' OR json_extract(m.data, '$.time.completed') IS NULL))) AS record FROM session s WHERE s.parent_id IS NULL";
 const MAX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 const LAUNCH_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a preview waits for the shared TUI to draw a session before it
@@ -1280,10 +1280,7 @@ impl OpenCodeSource {
                 Vec::new()
             });
             for managed in managed {
-                let mut session = agent_session_from_managed(&managed);
-                if let Some(persisted) = sessions.get(&session.provider_session_id) {
-                    session.summary = carry_context_prefix(&persisted.summary, &session.summary);
-                }
+                let session = agent_session_from_managed(&managed);
                 if (request.include_completed || session.state != SessionState::Completed)
                     && request
                         .cwd
@@ -1782,7 +1779,7 @@ fn overlay_managed(session: &mut AgentSession, managed: &ManagedOpenCodeSession)
     session.name = managed.title.clone();
     session.cwd = managed.cwd.clone();
     session.state = managed.state;
-    session.summary = carry_context_prefix(&session.summary, &managed.summary);
+    session.summary = managed.summary.clone();
     session.raw_state = Some("managed_server".into());
     session.pid = Some(managed.server_pid);
     session.started_at =
@@ -1819,15 +1816,7 @@ struct OpenCodeRecord {
     #[serde(default)]
     last: Option<LastMessage>,
     #[serde(default)]
-    context: Option<OpenCodeContext>,
-    #[serde(default)]
     child: Option<u64>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OpenCodeContext {
-    model: Option<String>,
-    tokens: Option<u64>,
 }
 
 pub fn parse_opencode_session_list(input: &str, runtime: Runtime) -> Result<Vec<AgentSession>> {
@@ -1944,7 +1933,6 @@ fn normalize_record(record: OpenCodeRecord, runtime: Runtime) -> AgentSession {
         // container. Explicit Docker control needs its own enrolled controller.
         BTreeSet::new()
     };
-    let summary = context_summary(record.context.as_ref(), &record.title);
     AgentSession {
         id: format!("opencode:{runtime_id}:{}", record.id),
         provider_session_id: record.id,
@@ -1955,7 +1943,7 @@ fn normalize_record(record: OpenCodeRecord, runtime: Runtime) -> AgentSession {
         cwd: record.directory,
         // The list command is a history API and exposes no live status.
         state: SessionState::Completed,
-        summary,
+        summary: record.title,
         raw_state: Some("persisted".into()),
         pid: None,
         started_at: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(record.created)),
@@ -1963,41 +1951,6 @@ fn normalize_record(record: OpenCodeRecord, runtime: Runtime) -> AgentSession {
         pull_requests: None,
         capabilities,
     }
-}
-
-fn context_summary(context: Option<&OpenCodeContext>, summary: &str) -> String {
-    let Some(context) = context else {
-        return summary.into();
-    };
-    let Some(tokens) = context.tokens.filter(|tokens| *tokens > 0) else {
-        return summary.into();
-    };
-    let model = context.model.as_deref().unwrap_or("unknown model");
-    format!(
-        "{} context · {model} · {summary}",
-        format_context_tokens(tokens)
-    )
-}
-
-fn carry_context_prefix(existing: &str, summary: &str) -> String {
-    let Some(marker) = existing.find(" context · ") else {
-        return summary.into();
-    };
-    let model_start = marker + " context · ".len();
-    let Some(model_end) = existing[model_start..].find(" · ") else {
-        return summary.into();
-    };
-    format!("{} · {summary}", &existing[..model_start + model_end])
-}
-
-fn format_context_tokens(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        return format!("{:.1}m", tokens as f64 / 1_000_000.0);
-    }
-    if tokens >= 1_000 {
-        return format!("{}k", (tokens + 500) / 1_000);
-    }
-    tokens.to_string()
 }
 
 /// Root session ID to its message text, from the restore transcript query.
@@ -2208,8 +2161,7 @@ mod tests {
           "updated": 1787089210008,
           "created": 1787089195916,
           "projectId": "global",
-          "directory": "/work/project",
-          "context": {"model": "gpt-5.6-sol", "tokens": 151436}
+          "directory": "/work/project"
         }]"#;
 
         let sessions = parse_opencode_session_list(input, Runtime::Host).unwrap();
@@ -2220,25 +2172,9 @@ mod tests {
         assert_eq!(sessions[0].state, SessionState::Completed);
         assert_eq!(sessions[0].cwd, PathBuf::from("/work/project"));
         assert_eq!(
-            sessions[0].summary,
-            "151k context · gpt-5.6-sol · Implement the dashboard"
-        );
-        assert_eq!(
             sessions[0].capabilities,
             BTreeSet::from([Capability::Inspect])
         );
-    }
-
-    #[test]
-    fn managed_metadata_keeps_the_persisted_context_prefix() {
-        assert_eq!(
-            carry_context_prefix(
-                "1.2m context · gpt-6-astra · old title",
-                "latest assistant summary"
-            ),
-            "1.2m context · gpt-6-astra · latest assistant summary"
-        );
-        assert_eq!(carry_context_prefix("old title", "latest"), "latest");
     }
 
     #[test]
