@@ -158,9 +158,9 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 Span::styled("●", core),
                 Span::styled(" ○  ", ring),
             ]),
-            Line::default(),
+            Line::from(Span::styled("   ○ ○   ", ring)),
             Line::from(vec![
-                Span::styled("   ○ ○   ", ring),
+                Span::raw("         "),
                 Span::styled(
                     format!("{awaiting} awaiting · {working} working · {completed_status}"),
                     Style::default().fg(palette().dim),
