@@ -912,69 +912,12 @@ fn render_usage(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let indent = if area.width >= 70 { 9 } else { 0 };
     let width = area.width.saturating_sub(indent);
     let now = crate::usage::now();
-    for (row, usage) in app.usage.iter().take(2).enumerate() {
-        // Keep every window visible; drop projections, then reset details
-        // only when the terminal cannot fit them.
-        let text = (0..3)
-            .map(|detail| {
-                let windows = usage
-                    .windows
-                    .iter()
-                    .map(|window| {
-                        let mut text = format!("{} {:.0}%", window.label, window.percent);
-                        if detail < 2 {
-                            if let Some((reset, _)) = window.reset_parts(now) {
-                                text.push_str(&format!(" · resets {reset}"));
-                            }
-                        }
-                        if detail == 0 {
-                            match window.pace(now) {
-                                Some(Pace::AtReset(percent)) => {
-                                    text.push_str(&format!(" · ~{percent:.0}% by reset"))
-                                }
-                                Some(Pace::HitsLimit(at)) => text.push_str(&format!(
-                                    " · full {}",
-                                    crate::usage::Window::when(at, now)
-                                )),
-                                _ => {}
-                            }
-                        }
-                        text
-                    })
-                    .collect::<Vec<_>>()
-                    .join("  │  ");
-                format!("{:<7} {windows}", usage.provider)
-            })
-            .find(|text| display_width(text) <= usize::from(width))
-            .unwrap_or_else(|| {
-                format!(
-                    "{} {}",
-                    usage.provider,
-                    usage
-                        .windows
-                        .iter()
-                        .map(|w| format!("{} {:.0}%", w.label, w.percent))
-                        .collect::<Vec<_>>()
-                        .join(" · ")
-                )
-            });
-        let alert = usage.windows.iter().any(|w| w.percent >= 90.0);
-        let mut spans = vec![Span::styled(
-            text,
-            Style::default().fg(if alert {
-                palette().attention
-            } else {
-                palette().dim
-            }),
-        )];
-        if row == 0 && spans[0].width() + 8 <= usize::from(width) {
-            spans.push(Span::styled(
-                "  /usage",
-                Style::default().fg(palette().accent),
-            ));
-        }
+    for (row, text) in usage_header_rows(&app.usage, now, usize::from(width))
+        .into_iter()
+        .enumerate()
+    {
         frame.render_widget(
-            Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().bg)),
+            Paragraph::new(text).style(Style::default().bg(palette().bg).fg(palette().dim)),
             Rect {
                 x: area.x + indent,
                 y: area.y + 1 + row as u16,
@@ -983,6 +926,89 @@ fn render_usage(frame: &mut Frame<'_>, app: &App, area: Rect) {
             },
         );
     }
+}
+
+fn usage_header_rows(usages: &[crate::usage::Usage], now: u64, width: usize) -> Vec<String> {
+    let mut labels = Vec::new();
+    for window in usages.iter().take(2).flat_map(|usage| &usage.windows) {
+        if !labels.contains(&window.label) {
+            labels.push(window.label);
+        }
+    }
+    // One shared layout for both providers, including empty cells for absent
+    // windows. Never move weekly usage into the hourly column.
+    for detail in 0..3 {
+        let cells = usages
+            .iter()
+            .take(2)
+            .map(|usage| {
+                labels
+                    .iter()
+                    .flat_map(|label| {
+                        let Some(window) =
+                            usage.windows.iter().find(|window| &window.label == label)
+                        else {
+                            return vec![String::new(); 3];
+                        };
+                        let used = format!("{:<4} {:>3.0}%", window.label, window.percent);
+                        let reset = if detail < 2 {
+                            format!(
+                                "reset {:>6}",
+                                window
+                                    .reset_parts(now)
+                                    .map(|parts| parts.0)
+                                    .unwrap_or_else(|| "—".into())
+                            )
+                        } else {
+                            String::new()
+                        };
+                        let pace = if detail == 0 {
+                            match window.pace(now) {
+                                Some(Pace::AtReset(percent)) => format!("~{percent:.0}% by reset"),
+                                Some(Pace::HitsLimit(at)) => {
+                                    format!("full {}", crate::usage::Window::when(at, now))
+                                }
+                                _ => String::new(),
+                            }
+                        } else {
+                            String::new()
+                        };
+                        vec![used, reset, pace]
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let widths = (0..labels.len() * 3)
+            .map(|column| {
+                cells
+                    .iter()
+                    .map(|row| display_width(&row[column]))
+                    .max()
+                    .unwrap_or(0)
+            })
+            .collect::<Vec<_>>();
+        let rows = usages
+            .iter()
+            .take(2)
+            .zip(cells)
+            .map(|(usage, cells)| {
+                let columns = cells
+                    .into_iter()
+                    .zip(&widths)
+                    .filter(|(_, width)| **width > 0)
+                    .map(|(text, width)| pad_to_width(text, *width))
+                    .collect::<Vec<_>>()
+                    .join("   ");
+                format!("{:<7} {columns}", usage.provider)
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        if detail == 2 || rows.iter().all(|row| display_width(row) <= width) {
+            return rows;
+        }
+    }
+    Vec::new()
 }
 
 fn render_usage_popup(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -3228,12 +3254,14 @@ mod tests {
 
         let wide = header(100);
         assert!(
-            wide.contains("claude  5h 100% · resets") && wide.contains("codex   5h 4% · resets"),
+            wide.contains("claude  5h   100%")
+                && wide.contains("codex   5h     4%")
+                && wide.contains("reset"),
             "{wide}"
         );
         let narrow = header(50);
         assert!(
-            narrow.contains("claude  5h 100%") && narrow.contains("codex   5h 4%"),
+            narrow.contains("claude  5h   100%") && narrow.contains("codex   5h     4%"),
             "{narrow}"
         );
     }
@@ -3268,12 +3296,12 @@ mod tests {
             for (row, provider) in [(1, "claude"), (2, "codex")] {
                 assert!(
                     lines[row].contains(provider)
-                        && lines[row].contains("5h 60%")
-                        && lines[row].contains("week 4%"),
+                        && lines[row].contains("5h    60%")
+                        && lines[row].contains("week   4%"),
                     "{text}"
                 );
                 if width >= 80 {
-                    assert!(lines[row].contains("resets"), "{text}");
+                    assert!(lines[row].contains("reset"), "{text}");
                 }
                 if width == 160 {
                     assert!(
@@ -3286,6 +3314,50 @@ mod tests {
                 lines[3].contains("0 awaiting · 0 working · 0 done"),
                 "{text}"
             );
+        }
+    }
+
+    #[test]
+    fn usage_table_aligns_weekly_windows_when_codex_has_no_hourly_window() {
+        let mut app = App::new(SessionSnapshot::default());
+        let window = |label, percent| crate::usage::Window {
+            label,
+            percent,
+            resets_at: Some(crate::usage::now() + 100_000),
+        };
+        app.usage = vec![
+            crate::usage::Usage {
+                provider: "claude",
+                windows: vec![window("5h", 0.0), window("week", 100.0)],
+            },
+            crate::usage::Usage {
+                provider: "codex",
+                windows: vec![window("week", 18.0)],
+            },
+        ];
+        for width in [50, 80, 120, 160] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 24)).unwrap();
+            terminal.draw(|frame| render(frame, &app)).unwrap();
+            let text = buffer_text(terminal.backend().buffer());
+            let lines = text.lines().collect::<Vec<_>>();
+            let column = |line: &str| line.find("week").map(|index| display_width(&line[..index]));
+            assert_eq!(column(lines[1]), column(lines[2]), "{text}");
+            assert!(
+                lines[1].contains("100%") && lines[2].contains("18%"),
+                "{text}"
+            );
+            for y in [1, 2] {
+                assert!(
+                    !lines[y].contains('│') && !lines[y].contains("/usage"),
+                    "{text}"
+                );
+                for x in 9..width {
+                    assert_eq!(
+                        terminal.backend().buffer().get(x, y as u16).fg,
+                        palette().dim
+                    );
+                }
+            }
         }
     }
 
