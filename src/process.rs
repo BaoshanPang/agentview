@@ -16,6 +16,9 @@ pub struct CommandRequest {
     pub args: Vec<String>,
     pub current_dir: Option<PathBuf>,
     pub timeout: Duration,
+    /// Capture stdout via a private regular file for CLIs that exit before
+    /// flushing a large piped write. The caller owns removal of this file.
+    pub stdout_file: Option<PathBuf>,
 }
 
 impl CommandRequest {
@@ -25,6 +28,7 @@ impl CommandRequest {
             args,
             current_dir: None,
             timeout: Duration::from_secs(5),
+            stdout_file: None,
         }
     }
 }
@@ -68,10 +72,22 @@ pub struct ProcessRunner;
 impl CommandRunner for ProcessRunner {
     fn run(&self, request: &CommandRequest) -> Result<CommandOutput> {
         let mut command = Command::new(&request.program);
+        let stdout = if let Some(path) = &request.stdout_file {
+            let mut options = std::fs::OpenOptions::new();
+            options.create_new(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            Stdio::from(options.open(path)?)
+        } else {
+            Stdio::piped()
+        };
         command
             .args(&request.args)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
+            .stdout(stdout)
             .stderr(Stdio::piped());
         #[cfg(unix)]
         {
@@ -89,9 +105,12 @@ impl CommandRunner for ProcessRunner {
                 request.args.join(" ")
             )
         })?;
-        let stdout = child.stdout.take().context("failed to capture stdout")?;
+        let stdout = child.stdout.take();
         let stderr = child.stderr.take().context("failed to capture stderr")?;
-        let stdout_reader = thread::spawn(move || read_all(stdout));
+        let stdout_reader = thread::spawn(move || match stdout {
+            Some(stdout) => read_all(stdout),
+            None => Ok(Vec::new()),
+        });
         let stderr_reader = thread::spawn(move || read_all(stderr));
         let deadline = Instant::now() + request.timeout;
 
@@ -116,6 +135,11 @@ impl CommandRunner for ProcessRunner {
         let stdout = stdout_reader
             .join()
             .map_err(|_| anyhow!("stdout reader thread panicked"))??;
+        let stdout = if let Some(path) = &request.stdout_file {
+            std::fs::read(path)?
+        } else {
+            stdout
+        };
         let stderr = stderr_reader
             .join()
             .map_err(|_| anyhow!("stderr reader thread panicked"))??;
@@ -341,6 +365,28 @@ fn read_all(mut reader: impl Read) -> Result<Vec<u8>> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn captures_large_stdout_through_a_private_file() {
+        let directory = crate::test_support::tempfile::tempdir().unwrap();
+        let path = directory.path().join("stdout");
+        let mut request = CommandRequest::new(
+            "sh",
+            vec![
+                "-c".into(),
+                "dd if=/dev/zero bs=65536 count=8 2>/dev/null".into(),
+            ],
+        );
+        request.stdout_file = Some(path.clone());
+        let output = ProcessRunner.run(&request).unwrap();
+        assert_eq!(output.status, 0);
+        assert_eq!(output.stdout.len(), 524288);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
 
     #[test]
     fn captures_stdout_and_status() {

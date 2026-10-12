@@ -1,6 +1,8 @@
 //! Safe bridge to the external `session-migrate` CLI.
 //!
-//! agentview never rewrites provider transcripts itself. It passes one
+//! agentview never rewrites provider transcripts itself. OpenCode folder moves
+//! round-trip an unchanged native bundle through its own export/import CLI.
+//! Cross-harness transfers pass one
 //! exact native session ID to session-migrate, validates its JSON result, and
 //! records only enough metadata to keep the imported row visible in agentview.
 
@@ -88,6 +90,9 @@ impl MigrationClient {
         }
         validate_text(&request.source.provider_session_id, "source session ID")?;
         validate_name(&request.name)?;
+        if request.is_move() && request.target == Provider::OpenCode {
+            return self.move_opencode(request);
+        }
 
         let mut args = vec![
             "transfer".into(),
@@ -144,6 +149,83 @@ impl MigrationClient {
             normalized_id,
             warnings,
         })
+    }
+
+    fn move_opencode(&self, request: &MigrationRequest) -> Result<MigrationOutcome> {
+        let executable = self.source_clis.get(&Provider::OpenCode).unwrap();
+        let export = |cwd: &Path| -> Result<serde_json::Value> {
+            let mut command = CommandRequest::new(
+                executable,
+                vec!["export".into(), request.source.provider_session_id.clone()],
+            );
+            command.current_dir = Some(cwd.to_owned());
+            command.timeout = MIGRATION_TIMEOUT;
+            // OpenCode exits before large writes to a pipe are flushed. A
+            // regular-file stdout makes its native export complete reliably.
+            let path = temporary_path(&std::env::temp_dir().join("agentview-export.json"))?;
+            let _cleanup = TemporaryExport(path.clone());
+            command.stdout_file = Some(path);
+            let output = self.runner.run(&command)?;
+            if output.status != 0 {
+                bail!("OpenCode export failed: {}", output.stderr_lossy());
+            }
+            let bundle: serde_json::Value = serde_json::from_slice(&output.stdout)
+                .context("OpenCode export returned invalid JSON")?;
+            if bundle["info"]["id"].as_str() != Some(&request.source.provider_session_id)
+                || !bundle["messages"].is_array()
+            {
+                bail!("OpenCode export did not return the selected session");
+            }
+            Ok(bundle)
+        };
+        let bundle = export(&request.source.cwd)?;
+        let path = temporary_path(&std::env::temp_dir().join("agentview-move.json"))?;
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
+        let _cleanup = TemporaryExport(path.clone());
+        serde_json::to_writer(&mut file, &bundle)?;
+        file.sync_all()?;
+        drop(file);
+        let mut command = CommandRequest::new(
+            executable,
+            vec!["import".into(), path.to_string_lossy().into_owned()],
+        );
+        command.current_dir = Some(request.cwd.clone());
+        command.timeout = MIGRATION_TIMEOUT;
+        let output = self.runner.run(&command)?;
+        if output.status != 0 {
+            bail!("OpenCode import failed: {}", output.stderr_lossy());
+        }
+        // Older CLIs silently skip an existing ID on import. Verify the native
+        // result before declaring success; never delete this in-place session.
+        let moved = export(&request.cwd)?;
+        if moved["info"]["directory"].as_str() != request.cwd.to_str()
+            || moved["messages"] != bundle["messages"]
+        {
+            bail!("OpenCode did not move the session with its history intact");
+        }
+        Ok(MigrationOutcome {
+            session_id: request.source.provider_session_id.clone(),
+            normalized_id: normalized_session_id(
+                &request.target,
+                &request.source.provider_session_id,
+            )?,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+struct TemporaryExport(PathBuf);
+
+impl Drop for TemporaryExport {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
     }
 }
 
@@ -663,6 +745,79 @@ mod tests {
             stdout: br#"{"session_id":"target-id","target_format":"codex","warnings":["one"]}"#
                 .to_vec(),
             stderr: Vec::new(),
+        }
+    }
+
+    struct NativeMoveRunner {
+        requests: Mutex<Vec<CommandRequest>>,
+        moved: bool,
+    }
+
+    impl CommandRunner for NativeMoveRunner {
+        fn run(&self, request: &CommandRequest) -> Result<CommandOutput> {
+            let mut requests = self.requests.lock().unwrap();
+            let index = requests.len();
+            requests.push(request.clone());
+            assert_eq!(request.program, "opencode-dev");
+            let bundle = serde_json::json!({
+                "info": {"id": "ses_source", "directory": if index == 2 && self.moved {"/work/arca"} else {"/work/project"}},
+                "messages": [{"info": {"id": "msg_original", "modelID": "custom-model"}, "parts": [{"type": "tool", "state": {"status": "completed", "output": "evidence"}}]}]
+            });
+            if index == 1 {
+                assert_eq!(request.args[0], "import");
+                let original: serde_json::Value =
+                    serde_json::from_slice(&fs::read(&request.args[1])?)?;
+                assert_eq!(original, bundle);
+            } else {
+                assert_eq!(request.args, ["export", "ses_source"]);
+            }
+            Ok(CommandOutput {
+                status: 0,
+                stdout: if index == 1 {
+                    b"Imported session: ses_source\n".to_vec()
+                } else {
+                    serde_json::to_vec(&bundle)?
+                },
+                stderr: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn opencode_move_uses_native_cli_preserves_history_and_cleans_export() {
+        for moved in [true, false] {
+            let runner = Arc::new(NativeMoveRunner {
+                requests: Mutex::new(Vec::new()),
+                moved,
+            });
+            let client = MigrationClient::with_runner("missing-session-migrate", runner.clone())
+                .with_source_cli(Provider::OpenCode, "opencode-dev");
+            let mut session = source(Provider::OpenCode);
+            session.provider_session_id = "ses_source".into();
+            let result = client.migrate(&MigrationRequest {
+                source: session,
+                target: Provider::OpenCode,
+                name: "evidence".into(),
+                cwd: PathBuf::from("/work/arca"),
+            });
+            if moved {
+                let outcome = result.unwrap();
+                assert_eq!(outcome.session_id, "ses_source");
+                assert_eq!(outcome.normalized_id, "opencode:host:ses_source");
+            } else {
+                assert!(result.unwrap_err().to_string().contains("did not move"));
+            }
+            let requests = runner.requests.lock().unwrap();
+            assert_eq!(
+                requests[0].current_dir.as_deref(),
+                Some(Path::new("/work/project"))
+            );
+            assert_eq!(
+                requests[1].current_dir.as_deref(),
+                Some(Path::new("/work/arca"))
+            );
+            assert_eq!(requests[2].current_dir, requests[1].current_dir);
+            assert!(!Path::new(&requests[1].args[1]).exists());
         }
     }
 

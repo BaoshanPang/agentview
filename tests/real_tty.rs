@@ -569,6 +569,89 @@ fn working_session_marker_blinks_in_a_real_terminal() {
 }
 
 #[test]
+fn opencode_move_keeps_the_same_row_and_never_hides_its_history() {
+    let _serial = serialize_real_tty_test();
+    let mut app = PtyApp::spawn_configured(110, 32, |command, home| {
+        let root = home.path();
+        let fixture = root.join("sessions.json");
+        let target = root.join("arca");
+        fs::create_dir(&target).unwrap();
+        fs::write(
+            &fixture,
+            serde_json::to_vec(&serde_json::json!({"sessions": [{
+                "id": "opencode:host:ses_evidence", "provider_session_id": "ses_evidence",
+                "provider": "opencode", "runtime": {"kind": "host"}, "kind": "managed",
+                "name": "casa-questionnaire-evidence", "cwd": root,
+                "state": "completed", "summary": "questionnaire evidence", "capabilities": []
+            }]}))
+            .unwrap(),
+        )
+        .unwrap();
+        let cli = root.join("opencode-dev");
+        fs::write(
+            &cli,
+            r#"#!/usr/bin/env python3
+import json, os, pathlib, sys
+fixture = pathlib.Path(os.environ['MOVE_FIXTURE'])
+data = json.loads(fixture.read_text())
+session = data['sessions'][0]
+bundle = {'info': {'id': 'ses_evidence', 'directory': session['cwd']}, 'messages': []}
+if sys.argv[1] == 'export':
+    print(json.dumps(bundle))
+elif sys.argv[1] == 'import':
+    assert json.loads(pathlib.Path(sys.argv[2]).read_text()) == bundle
+    session['cwd'] = os.getcwd()
+    fixture.write_text(json.dumps(data))
+    print('Imported session: ses_evidence')
+else:
+    raise AssertionError(sys.argv)
+"#,
+        )
+        .unwrap();
+        fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+        command.env("MOVE_FIXTURE", &fixture).args([
+            "--fixture",
+            fixture.to_str().unwrap(),
+            "--all",
+            "--include-temp",
+            "--opencode-bin",
+            cli.to_str().unwrap(),
+            "--session-migrate-bin",
+            "/missing-session-migrate",
+            "--refresh-ms",
+            "60000",
+        ]);
+    });
+    app.wait_for("original evidence row", |s| {
+        s.contains("casa-questionnaire-evidence")
+    });
+    app.send(CTRL_M_ENHANCED);
+    app.wait_for("move folder picker", |s| {
+        s.contains("move session to folder")
+    });
+    let target = app.home_path().join("arca").canonicalize().unwrap();
+    app.send(target.to_str().unwrap().as_bytes());
+    app.send(ENTER);
+    app.wait_for("same evidence row moved", |s| {
+        s.contains("moved casa-questionnaire-evidence to")
+            && s.lines()
+                .any(|line| line.contains("• casa-questionnaire-evidence"))
+    });
+    let fixture: serde_json::Value =
+        serde_json::from_slice(&fs::read(app.home_path().join("sessions.json")).unwrap()).unwrap();
+    assert_eq!(fixture["sessions"][0]["cwd"].as_str(), target.to_str());
+    assert_eq!(
+        fixture["sessions"][0]["provider_session_id"],
+        "ses_evidence"
+    );
+    let hidden = app.home_path().join("state/agentview/hidden-sessions.json");
+    if hidden.exists() {
+        assert!(!fs::read_to_string(hidden).unwrap().contains("ses_evidence"));
+    }
+    app.exit_cleanly();
+}
+
+#[test]
 fn ctrl_m_moves_through_the_real_tui_and_keeps_enter_distinct() {
     let _serial = serialize_real_tty_test();
     let mut app = PtyApp::spawn_configured(110, 32, |command, home| {

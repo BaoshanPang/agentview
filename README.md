@@ -74,7 +74,8 @@ own interface.
   `Option+Shift`, as in OpenCode. Typing replaces the selection.
 - **Move a session to another folder** with `Ctrl+M` (`Cmd+M` where the
   terminal forwards it), or **migrate it** to another harness with `/migrate`,
-  both via [session-migrate](https://session-migrate.github.io/).
+  using [session-migrate](https://session-migrate.github.io/). OpenCode folder
+  moves use its native CLI and preserve the session ID and full history.
 - **OpenCode sessions outlive the dashboard**, and Cursor chats show live state
   on every platform.
 - **Per-project OpenCode models:** choose `Default` in the model picker to use

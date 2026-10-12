@@ -500,6 +500,14 @@ pub fn run_dashboard(
                                             &completed.request.name,
                                         );
                                         match alias_result {
+                                            Ok(_) if completed.request.is_move()
+                                                && outcome.session_id == completed.request.source.provider_session_id => {
+                                                app.set_notice(format!(
+                                                    "moved {} to {}",
+                                                    completed.request.name,
+                                                    completed.request.cwd.display(),
+                                                ));
+                                            }
                                             Ok(_) if completed.request.is_move() => {
                                                 let notice = remove_moved_source(
                                                     &mut app,
