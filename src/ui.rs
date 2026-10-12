@@ -919,14 +919,14 @@ fn usage_header_rows(usages: &[crate::usage::Usage], now: u64, width: usize) -> 
                         else {
                             return vec![String::new(); 3];
                         };
-                        let used = format!("{:<4} {:>3.0}%", window.label, window.percent);
+                        let used = format!("{:<4} {:>3.0}% used", window.label, window.percent);
                         let reset = if detail < 2 {
                             format!(
                                 "reset {:>6}",
                                 window
                                     .reset_parts(now)
                                     .map(|parts| parts.0)
-                                    .unwrap_or_else(|| "—".into())
+                                    .unwrap_or_else(|| "unknown".into())
                             )
                         } else {
                             String::new()
@@ -3265,8 +3265,8 @@ mod tests {
             for (row, provider) in [(1, "claude"), (2, "codex")] {
                 assert!(
                     lines[row].contains(provider)
-                        && lines[row].contains("5h    60%")
-                        && lines[row].contains("week   4%"),
+                        && lines[row].contains("5h    60% used")
+                        && lines[row].contains("week   4% used"),
                     "{text}"
                 );
                 if width >= 80 {
@@ -3325,6 +3325,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn usage_header_labels_missing_reset_as_unknown() {
+        let rows = usage_header_rows(
+            &[crate::usage::Usage {
+                provider: "claude",
+                windows: vec![crate::usage::Window {
+                    label: "5h",
+                    percent: 0.0,
+                    resets_at: None,
+                }],
+            }],
+            0,
+            80,
+        );
+        assert!(rows[0].contains("0% used"));
+        assert!(rows[0].contains("reset unknown"));
     }
 
     #[test]
