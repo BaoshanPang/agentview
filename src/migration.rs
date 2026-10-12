@@ -178,7 +178,10 @@ impl MigrationClient {
             }
             Ok(bundle)
         };
-        let bundle = export(&request.source.cwd)?;
+        // OpenCode's export looks up the exact ID in its global store. The
+        // session's old worktree may already have been removed, so run from
+        // the destination rather than requiring that old directory to exist.
+        let bundle = export(&request.cwd)?;
         let path = temporary_path(&std::env::temp_dir().join("agentview-move.json"))?;
         let mut options = OpenOptions::new();
         options.create_new(true).write(true);
@@ -810,7 +813,7 @@ mod tests {
             let requests = runner.requests.lock().unwrap();
             assert_eq!(
                 requests[0].current_dir.as_deref(),
-                Some(Path::new("/work/project"))
+                Some(Path::new("/work/arca"))
             );
             assert_eq!(
                 requests[1].current_dir.as_deref(),

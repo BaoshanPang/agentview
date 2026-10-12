@@ -133,6 +133,9 @@ fn real_opencode_moves_large_history_without_session_migrate() {
             .to_string(),
     )
     .with_source_cli(Provider::OpenCode, cli.display().to_string());
+    // A completed agent's worktree is often removed before its session moves.
+    // The first move must work even though its recorded cwd no longer exists.
+    fs::remove_dir(&source).unwrap();
     let mut session = AgentSession {
         id: format!("opencode:host:{id}"),
         provider_session_id: id.into(),
@@ -183,6 +186,9 @@ fn real_opencode_moves_large_history_without_session_migrate() {
             "history changed during move {index}"
         );
         session.cwd = destination.clone();
+        if index == 0 {
+            fs::create_dir(&source).unwrap();
+        }
     }
     let db = rusqlite::Connection::open_with_flags(
         root.join("data/opencode/opencode.db"),
