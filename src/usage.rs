@@ -158,6 +158,20 @@ impl Window {
         ))
     }
 
+    /// Use at the reset if the average rate holds, past 100% included (the
+    /// header shows `→307%` rather than a separate "runs out" form).
+    pub fn projected_percent(&self, now: u64) -> Option<f64> {
+        match self.pace(now)? {
+            Pace::AtReset(projected) => Some(projected),
+            Pace::HitsLimit(_) => {
+                let length = self.length()?;
+                let elapsed = length - self.resets_at?.saturating_sub(now).min(length);
+                Some(self.percent * length as f64 / elapsed as f64)
+            }
+            Pace::TooEarly => None,
+        }
+    }
+
     /// `Sat 3:12 PM`, or a countdown where local time is unavailable.
     pub fn when(at: u64, now: u64) -> String {
         local_clock(at, now).unwrap_or_else(|| format!("in {}", countdown(at.saturating_sub(now))))
@@ -344,7 +358,7 @@ fn keychain_claude_credentials() -> Option<String> {
         .flatten()
 }
 
-pub fn countdown(seconds: u64) -> String {
+fn countdown(seconds: u64) -> String {
     let (days, hours, minutes) = (seconds / 86_400, seconds / 3600 % 24, seconds / 60 % 60);
     match (days, hours) {
         (0, 0) => format!("{minutes}m"),
@@ -499,6 +513,10 @@ mod tests {
             Some(Pace::HitsLimit(_))
         ));
         assert_eq!(week(100.0, day).pace(1_000_000), None);
+        // The percent form keeps going past 100: 25% one day in is 175%.
+        let over = week(25.0, 6 * day).projected_percent(1_000_000).unwrap();
+        assert!((over - 175.0).abs() < 0.01, "{over}");
+        assert_eq!(week(5.0, 7 * day - 3600).projected_percent(1_000_000), None);
     }
 
     #[test]

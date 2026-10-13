@@ -951,21 +951,23 @@ fn usage_header_rows(usages: &[crate::usage::Usage], now: u64, width: usize) -> 
                             String::new()
                         };
                         let pace = if detail < 2 {
-                            match window.pace(now) {
-                                Some(Pace::AtReset(percent)) if detail == 0 => {
-                                    format!("~{percent:.0}% by reset")
+                            // Always a percent, over 100 included, so the column
+                            // reads the same whether you will finish under the
+                            // limit or run out before the reset.
+                            match window.projected_percent(now) {
+                                Some(percent) => {
+                                    let shown = if percent > 999.0 {
+                                        ">999%".to_owned()
+                                    } else {
+                                        format!("{percent:.0}%")
+                                    };
+                                    if detail == 0 {
+                                        format!("~{shown} by reset")
+                                    } else {
+                                        format!("→{shown}")
+                                    }
                                 }
-                                Some(Pace::AtReset(percent)) => format!("→{percent:.0}%"),
-                                Some(Pace::HitsLimit(at)) if detail == 0 => {
-                                    format!("full {}", crate::usage::Window::when(at, now))
-                                }
-                                Some(Pace::HitsLimit(at)) => {
-                                    format!(
-                                        "full {}",
-                                        crate::usage::countdown(at.saturating_sub(now))
-                                    )
-                                }
-                                _ => String::new(),
+                                None => String::new(),
                             }
                         } else {
                             String::new()
@@ -3468,13 +3470,11 @@ mod tests {
         ];
         let wide = usage_header_rows(&usages, now, 130);
         assert!(wide[0].matches("by reset").count() == 2, "{wide:?}");
-        assert!(wide[1].contains("full "), "{wide:?}");
+        // 20% eleven hours in: 305% by the reset, shown as a percent like the rest.
+        assert!(wide[1].contains("~305% by reset"), "{wide:?}");
         let mid = usage_header_rows(&usages, now, 100);
         assert!(mid[0].matches('→').count() == 2, "{mid:?}");
-        assert!(
-            mid[1].contains("full ") && !mid[1].contains(" PM"),
-            "{mid:?}"
-        );
+        assert!(mid[1].contains("→305%"), "{mid:?}");
         assert!(mid.iter().all(|row| display_width(row) <= 100), "{mid:?}");
         let narrow = usage_header_rows(&usages, now, 78);
         assert!(
