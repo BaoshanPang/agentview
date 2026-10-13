@@ -143,7 +143,9 @@ impl Window {
         }
         let length = self.length()?;
         let elapsed = length - self.resets_at?.saturating_sub(now).min(length);
-        if elapsed * 10 < length {
+        // A tenth of the window, but never more than 6h: a week would otherwise
+        // show nothing for its first 17 hours, right when you want a forecast.
+        if elapsed < (length / 10).min(6 * 3600) {
             return Some(Pace::TooEarly);
         }
         let projected = self.percent * length as f64 / elapsed as f64;
@@ -477,6 +479,22 @@ mod tests {
             week(5.0, 7 * day - 3600).pace(1_000_000),
             Some(Pace::TooEarly)
         );
+        // 8h into the week at 4%: projected without waiting for 17h to pass.
+        let Some(Pace::AtReset(early)) = week(4.0, 7 * day - 8 * 3600).pace(1_000_000) else {
+            panic!("expected a projection 8h in");
+        };
+        assert!((early - 84.0).abs() < 0.01, "{early}");
+        // The 5h window keeps its tenth (30 minutes).
+        let five_hour = |left: u64| Window {
+            label: "5h",
+            percent: 10.0,
+            resets_at: Some(1_000_000 + left),
+        };
+        assert_eq!(five_hour(5 * 3600 - 600).pace(1_000_000), Some(Pace::TooEarly));
+        assert!(matches!(
+            five_hour(5 * 3600 - 1800).pace(1_000_000),
+            Some(Pace::HitsLimit(_))
+        ));
         assert_eq!(week(100.0, day).pace(1_000_000), None);
     }
 
