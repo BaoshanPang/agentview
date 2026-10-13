@@ -2617,10 +2617,22 @@ mod tests {
                       "action": {"reason": "account_rate_limit", "provider": "opencode", "title": "Go limit reached"}},
             "failed": {"type": "error"},
         });
-        assert_eq!(state_from_statuses(&statuses, "backoff"), SessionState::Working);
-        assert_eq!(state_from_statuses(&statuses, "limit"), SessionState::NeedsInput);
-        assert_eq!(state_from_statuses(&statuses, "failed"), SessionState::NeedsInput);
-        assert_eq!(state_from_statuses(&statuses, "missing"), SessionState::Completed);
+        assert_eq!(
+            state_from_statuses(&statuses, "backoff"),
+            SessionState::Working
+        );
+        assert_eq!(
+            state_from_statuses(&statuses, "limit"),
+            SessionState::NeedsInput
+        );
+        assert_eq!(
+            state_from_statuses(&statuses, "failed"),
+            SessionState::NeedsInput
+        );
+        assert_eq!(
+            state_from_statuses(&statuses, "missing"),
+            SessionState::Completed
+        );
     }
 
     #[test]

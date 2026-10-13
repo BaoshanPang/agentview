@@ -397,7 +397,13 @@ fn render_session_row(
     let hold_reason = (view_mode == ViewMode::Directory && session.state == SessionState::Working)
         .then(|| session.raw_state.as_deref()?.strip_prefix("background: "))
         .flatten()
-        .map(|reason| if reason == "shell" { "background shell running" } else { reason });
+        .map(|reason| {
+            if reason == "shell" {
+                "background shell running"
+            } else {
+                reason
+            }
+        });
     let state_label = match (view_mode == ViewMode::Directory, hold_reason) {
         (false, _) => "",
         (true, Some(_)) => "Background",
@@ -1961,6 +1967,39 @@ fn render_directory_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+/// The provider of a `provider/model` choice; the default entry has none.
+fn model_provider(model: Option<&str>) -> &str {
+    model
+        .and_then(|value| value.split('/').next())
+        .unwrap_or("")
+}
+
+/// Extra rows the provider headings and separators add to one page of choices, or 0
+/// when the page holds fewer than two providers. The default entry has no provider
+/// and gets no heading, only a separator.
+fn model_group_rows(choices: &[Option<&str>], start: usize, rows: usize) -> usize {
+    let mut groups: Vec<&str> = Vec::new();
+    for model in choices.iter().skip(start).take(rows) {
+        let provider = model_provider(*model);
+        if groups.last() != Some(&provider) {
+            groups.push(provider);
+        }
+    }
+    if groups
+        .iter()
+        .filter(|provider| !provider.is_empty())
+        .count()
+        < 2
+    {
+        return 0;
+    }
+    let headings = groups
+        .iter()
+        .filter(|provider| !provider.is_empty())
+        .count();
+    headings + groups.len() - 1
+}
+
 fn render_model_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let terminal_shells = app.launch_provider == Provider::Terminal;
     let choices = app.model_choices();
@@ -1991,7 +2030,25 @@ fn render_model_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         choices.len().clamp(1, visible_rows)
     };
-    let popup_height = (result_rows as u16 + 5)
+    let start = if choices.is_empty() {
+        0
+    } else {
+        (app.model_selection / visible_rows) * visible_rows
+    };
+    // Choices from more than one provider get a heading per provider and a blank line
+    // between them, so a long list reads as groups. Skipped when the terminal is too
+    // short to fit the extra rows, which would clip the selected row.
+    let group_rows = if terminal_shells {
+        0
+    } else {
+        model_group_rows(&choices, start, visible_rows)
+    };
+    let group_rows = if ((result_rows + group_rows) as u16 + 5) <= area.height.saturating_sub(2) {
+        group_rows
+    } else {
+        0
+    };
+    let popup_height = ((result_rows + group_rows) as u16 + 5)
         .min(area.height.saturating_sub(2))
         .max(6);
     let popup = Rect::new(
@@ -2000,11 +2057,6 @@ fn render_model_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
         popup_width,
         popup_height,
     );
-    let start = if choices.is_empty() {
-        0
-    } else {
-        (app.model_selection / visible_rows) * visible_rows
-    };
     let mut lines = vec![Line::from(vec![
         Span::styled(" filter  ", Style::default().fg(palette().dim)),
         Span::styled(
@@ -2062,13 +2114,31 @@ fn render_model_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
             );
         }
     } else {
-        lines.extend(
-            choices
-                .iter()
-                .enumerate()
-                .skip(start)
-                .take(visible_rows)
-                .map(|(index, model)| {
+        let mut previous_provider: Option<&str> = None;
+        let grouped = group_rows > 0;
+        let rows = choices
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible_rows)
+            .flat_map(|(index, model)| {
+                let mut rows: Vec<Line<'static>> = Vec::new();
+                if grouped {
+                    let provider = model_provider(*model);
+                    if previous_provider != Some(provider) {
+                        if previous_provider.is_some() {
+                            rows.push(Line::from(""));
+                        }
+                        if !provider.is_empty() {
+                            rows.push(Line::from(Span::styled(
+                                format!(" {}", sanitize_inline(provider)),
+                                Style::default().fg(palette().dim),
+                            )));
+                        }
+                        previous_provider = Some(provider);
+                    }
+                }
+                rows.push({
                     let selected = index == app.model_selection;
                     let label = match model {
                         None if terminal_shells => "Default shell".to_owned(),
@@ -2095,8 +2165,11 @@ fn render_model_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
                     } else {
                         Style::default().bg(palette().bg).fg(palette().fg)
                     })
-                }),
-        );
+                });
+                rows
+            })
+            .collect::<Vec<_>>();
+        lines.extend(rows);
     }
     if app.models_loading && !choices.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -3546,6 +3619,57 @@ mod tests {
         assert!(filtered.contains("provider/model-24"));
         assert!(!filtered.contains("provider/model-23"));
         assert_eq!(terminal.get_cursor().unwrap(), (24, 13));
+    }
+
+    #[test]
+    fn model_picker_groups_choices_by_provider_when_there_are_several() {
+        let mut app = App::with_launch_targets(
+            SessionSnapshot::default(),
+            false,
+            Provider::Pi,
+            vec![LaunchTarget {
+                provider: Provider::Pi,
+                supports_model: true,
+            }],
+        );
+        app.start_new_session(None);
+        app.open_model_picker();
+        app.set_available_models(
+            Provider::Pi,
+            Ok(vec![
+                "anthropic/claude-opus-5-5".into(),
+                "anthropic/claude-sonnet-5-5".into(),
+                "openai/gpt-6.1-sol".into(),
+            ]),
+        );
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        let rows: Vec<&str> = text.lines().map(str::trim).collect();
+        let heading = |name: &str| {
+            rows.iter()
+                .position(|row| row.trim_matches('│').trim() == name)
+                .unwrap_or_else(|| panic!("no {name} heading in {text}"))
+        };
+        let anthropic = heading("anthropic");
+        let openai = heading("openai");
+        assert!(rows[anthropic + 1].contains("anthropic/claude-opus-5-5"));
+        assert!(rows[anthropic + 2].contains("anthropic/claude-sonnet-5-5"));
+        assert!(rows[anthropic + 3].trim_matches('│').trim().is_empty());
+        assert_eq!(openai, anthropic + 4);
+        assert!(rows[openai + 1].contains("openai/gpt-6.1-sol"));
+
+        // One provider: no headings.
+        app.push_input('o');
+        app.push_input('p');
+        app.push_input('e');
+        app.push_input('n');
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let single = buffer_text(terminal.backend().buffer());
+        assert!(!single
+            .lines()
+            .any(|row| row.trim_matches('│').trim() == "openai"));
     }
 
     #[test]

@@ -33,6 +33,7 @@ use crate::process::{CancellableProcessRunner, CommandRequest, CommandRunner};
 // read through the (session_id, time_created) index, which live state needs;
 // `child` is when the newest unfinished turn of a subagent session began.
 const GLOBAL_SESSION_ROWS: &str = "SELECT json_object('id', s.id, 'title', s.title, 'created', s.time_created, 'updated', s.time_updated, 'projectId', s.project_id, 'directory', s.directory, 'last', json((SELECT json_object('role', json_extract(m.data, '$.role'), 'created', m.time_created, 'completed', json_extract(m.data, '$.time.completed'), 'question', EXISTS (SELECT 1 FROM part p WHERE p.message_id = m.id AND json_extract(p.data, '$.tool') = 'question' AND json_extract(p.data, '$.state.status') IN ('pending', 'running'))) FROM message m WHERE m.session_id = s.id ORDER BY m.time_created DESC, m.id DESC LIMIT 1)), 'child', (SELECT MAX(m.time_created) FROM session c JOIN message m ON m.id = (SELECT m2.id FROM message m2 WHERE m2.session_id = c.id ORDER BY m2.time_created DESC, m2.id DESC LIMIT 1) WHERE c.parent_id = s.id AND (json_extract(m.data, '$.role') = 'user' OR json_extract(m.data, '$.time.completed') IS NULL))) AS record FROM session s WHERE s.parent_id IS NULL";
+const MODEL_DISCOVERY_TIMEOUT_SECS: u64 = 30;
 const MAX_MODEL_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 const LAUNCH_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long a preview waits for the shared TUI to draw a session before it
@@ -1059,7 +1060,10 @@ impl OpenCodeSource {
         let mut args = self.invocation.prefix_args.clone();
         args.push("models".into());
         let mut command = CommandRequest::new(self.invocation.program.clone(), args);
-        command.timeout = Duration::from_secs(8);
+        // `opencode models` boots the whole CLI (config, plugins, every provider). It
+        // takes 1-2 s on an idle machine and over 10 s when the machine is loaded, so
+        // 8 s made the picker fail with "command timed out" exactly when it was busy.
+        command.timeout = Duration::from_secs(MODEL_DISCOVERY_TIMEOUT_SECS);
         let output = self.runner.run(&command)?;
         if output.status != 0 {
             bail!(
@@ -2191,7 +2195,7 @@ mod tests {
     #[test]
     fn controller_uses_the_documented_opencode_models_command() {
         let mut expected = CommandRequest::new("opencode", vec!["models".into()]);
-        expected.timeout = Duration::from_secs(8);
+        expected.timeout = Duration::from_secs(MODEL_DISCOVERY_TIMEOUT_SECS);
         let runner = Arc::new(FakeRunner {
             expected,
             output: Mutex::new(Some(CommandOutput {
