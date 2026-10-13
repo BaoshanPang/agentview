@@ -344,7 +344,7 @@ fn keychain_claude_credentials() -> Option<String> {
         .flatten()
 }
 
-fn countdown(seconds: u64) -> String {
+pub fn countdown(seconds: u64) -> String {
     let (days, hours, minutes) = (seconds / 86_400, seconds / 3600 % 24, seconds / 60 % 60);
     match (days, hours) {
         (0, 0) => format!("{minutes}m"),
@@ -490,7 +490,10 @@ mod tests {
             percent: 10.0,
             resets_at: Some(1_000_000 + left),
         };
-        assert_eq!(five_hour(5 * 3600 - 600).pace(1_000_000), Some(Pace::TooEarly));
+        assert_eq!(
+            five_hour(5 * 3600 - 600).pace(1_000_000),
+            Some(Pace::TooEarly)
+        );
         assert!(matches!(
             five_hour(5 * 3600 - 1800).pace(1_000_000),
             Some(Pace::HitsLimit(_))

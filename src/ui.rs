@@ -921,7 +921,11 @@ fn usage_header_rows(usages: &[crate::usage::Usage], now: u64, width: usize) -> 
     }
     // One shared layout for both providers, including empty cells for absent
     // windows. Never move weekly usage into the hourly column.
-    for detail in 0..3 {
+    // Detail levels, widest first: 0 spells the forecast out ("~93% by
+    // reset"), 1 keeps it as "→93%", 2 drops it, 3 drops the reset too. A
+    // narrow terminal loses detail one step at a time instead of every
+    // forecast at once.
+    for detail in 0..4 {
         let cells = usages
             .iter()
             .take(2)
@@ -935,7 +939,7 @@ fn usage_header_rows(usages: &[crate::usage::Usage], now: u64, width: usize) -> 
                             return vec![String::new(); 3];
                         };
                         let used = format!("{:<4} {:>3.0}% used", window.label, window.percent);
-                        let reset = if detail < 2 {
+                        let reset = if detail < 3 {
                             format!(
                                 "reset {:>6}",
                                 window
@@ -946,11 +950,20 @@ fn usage_header_rows(usages: &[crate::usage::Usage], now: u64, width: usize) -> 
                         } else {
                             String::new()
                         };
-                        let pace = if detail == 0 {
+                        let pace = if detail < 2 {
                             match window.pace(now) {
-                                Some(Pace::AtReset(percent)) => format!("~{percent:.0}% by reset"),
-                                Some(Pace::HitsLimit(at)) => {
+                                Some(Pace::AtReset(percent)) if detail == 0 => {
+                                    format!("~{percent:.0}% by reset")
+                                }
+                                Some(Pace::AtReset(percent)) => format!("→{percent:.0}%"),
+                                Some(Pace::HitsLimit(at)) if detail == 0 => {
                                     format!("full {}", crate::usage::Window::when(at, now))
+                                }
+                                Some(Pace::HitsLimit(at)) => {
+                                    format!(
+                                        "full {}",
+                                        crate::usage::countdown(at.saturating_sub(now))
+                                    )
                                 }
                                 _ => String::new(),
                             }
@@ -988,7 +1001,7 @@ fn usage_header_rows(usages: &[crate::usage::Usage], now: u64, width: usize) -> 
                     .to_owned()
             })
             .collect::<Vec<_>>();
-        if detail == 2 || rows.iter().all(|row| display_width(row) <= width) {
+        if detail == 3 || rows.iter().all(|row| display_width(row) <= width) {
             return rows;
         }
     }
@@ -3429,6 +3442,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn usage_header_keeps_forecasts_by_shortening_them_before_dropping_them() {
+        let now = 1_000_000;
+        let window = |label, percent, left| crate::usage::Window {
+            label,
+            percent,
+            resets_at: Some(now + left),
+        };
+        let usages = [
+            crate::usage::Usage {
+                provider: "claude",
+                windows: vec![
+                    window("5h", 3.0, 4 * 3600 + 1260),
+                    window("week", 5.0, 6 * 86_400 + 15 * 3600),
+                ],
+            },
+            crate::usage::Usage {
+                provider: "codex",
+                // 20% eleven hours in runs out in about 2 days.
+                windows: vec![window("week", 20.0, 6 * 86_400 + 13 * 3600)],
+            },
+        ];
+        let wide = usage_header_rows(&usages, now, 130);
+        assert!(wide[0].matches("by reset").count() == 2, "{wide:?}");
+        assert!(wide[1].contains("full "), "{wide:?}");
+        let mid = usage_header_rows(&usages, now, 100);
+        assert!(mid[0].matches('→').count() == 2, "{mid:?}");
+        assert!(
+            mid[1].contains("full ") && !mid[1].contains(" PM"),
+            "{mid:?}"
+        );
+        assert!(mid.iter().all(|row| display_width(row) <= 100), "{mid:?}");
+        let narrow = usage_header_rows(&usages, now, 78);
+        assert!(
+            !narrow[0].contains('→') && narrow[0].contains("reset"),
+            "{narrow:?}"
+        );
     }
 
     #[test]
