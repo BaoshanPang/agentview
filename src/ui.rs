@@ -392,9 +392,18 @@ fn render_session_row(
     } else {
         String::new()
     };
-    let state_label = (view_mode == ViewMode::Directory)
-        .then(|| short_state(session.state))
-        .unwrap_or_default();
+    // A hold from a plugin monitor keeps a finished session working. Say so instead of
+    // showing a bare "Working" next to the last message, which reads as a live turn.
+    let hold_reason = (view_mode == ViewMode::Directory && session.state == SessionState::Working)
+        .then(|| session.raw_state.as_deref()?.strip_prefix("background: "))
+        .flatten()
+        .map(|reason| if reason == "shell" { "background shell running" } else { reason });
+    let state_label = match (view_mode == ViewMode::Directory, hold_reason) {
+        (false, _) => "",
+        (true, Some(_)) => "Background",
+        (true, None) => short_state(session.state),
+    };
+    let summary_text = hold_reason.unwrap_or(&session.summary);
     let age = format_age(session.age(SystemTime::now()));
     let prs = session
         .pull_requests
@@ -437,14 +446,14 @@ fn render_session_row(
     if label_width > 0 {
         spans.push(Span::styled(label, symbol_style));
     }
-    let separator = if label_width > 0 && !session.summary.is_empty() {
+    let separator = if label_width > 0 && !summary_text.is_empty() {
         " · "
     } else {
         ""
     };
     let rest = summary_width.saturating_sub(label_width);
     if rest > 0 {
-        let summary = truncate(&format!("{separator}{}", session.summary), rest);
+        let summary = truncate(&format!("{separator}{summary_text}"), rest);
         spans.push(Span::styled(
             pad_to_width(summary, rest),
             Style::default().fg(palette().dim),
@@ -2728,6 +2737,28 @@ mod tests {
             assert!(text.contains(&format!("{label} · latest summary from worker")));
             assert_eq!(display_width(&text), 120);
         }
+    }
+
+    #[test]
+    fn directory_row_names_the_background_work_that_holds_a_session_working() {
+        let row_text = |raw_state: &str, view_mode| {
+            let mut item = session("worker", SessionState::Working);
+            item.raw_state = Some(raw_state.into());
+            let row = render_session_row(&item, view_mode, 120, true, false, true, None);
+            row.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        };
+
+        let held = row_text("background: Finish compaction", ViewMode::Directory);
+        assert!(held.contains("Background · Finish compaction"));
+        assert!(!held.contains("latest summary from worker"));
+        assert!(row_text("background: shell", ViewMode::Directory)
+            .contains("Background · background shell running"));
+        assert!(row_text("server busy", ViewMode::Directory)
+            .contains("Working · latest summary from worker"));
+        assert!(!row_text("background: Finish compaction", ViewMode::Status).contains("Background"));
     }
 
     #[test]
