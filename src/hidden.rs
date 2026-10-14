@@ -74,7 +74,18 @@ impl Default for RegistryDocument {
 pub struct HiddenSessions {
     path: PathBuf,
     records: Arc<Mutex<BTreeMap<String, HiddenSessionRecord>>>,
+    /// Size and modified time of the file `records` was last read from or
+    /// written to, so a hide made by the CLI or another dashboard shows up on
+    /// the next refresh without a restart.
+    stamp: Arc<Mutex<Option<FileStamp>>>,
     temporary: Option<TemporaryFilter>,
+}
+
+type FileStamp = (SystemTime, u64);
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
 }
 
 /// Agents start throwaway sessions (model comparisons, scratch reproductions)
@@ -97,10 +108,12 @@ impl HiddenSessions {
             .parent()
             .context("hidden-session registry path has no parent")?;
         ensure_private_directory(parent)?;
+        let stamp = file_stamp(&path);
         let records = read_registry(&path)?;
         Ok(Self {
             path,
             records: Arc::new(Mutex::new(records)),
+            stamp: Arc::new(Mutex::new(stamp)),
             temporary: None,
         })
     }
@@ -142,6 +155,7 @@ impl HiddenSessions {
     /// Remove locally hidden records from a snapshot before the App performs
     /// grouping or its bounded 25-row pagination.
     pub fn filter_snapshot(&self, snapshot: &mut SessionSnapshot) {
+        self.refresh_if_changed();
         let records = self
             .records
             .lock()
@@ -209,6 +223,26 @@ impl HiddenSessions {
         self.mutate(move |records| Ok(records.remove(&session_id)))
     }
 
+    /// Re-read the registry when another process changed the file. A file
+    /// that cannot be read right now keeps the rows already loaded.
+    fn refresh_if_changed(&self) {
+        let current = file_stamp(&self.path);
+        let mut stamp = self
+            .stamp
+            .lock()
+            .expect("hidden-session stamp mutex poisoned");
+        if *stamp == current {
+            return;
+        }
+        if let Ok(records) = read_registry(&self.path) {
+            *self
+                .records
+                .lock()
+                .expect("hidden-session registry mutex poisoned") = records;
+            *stamp = current;
+        }
+    }
+
     fn mutate<T>(
         &self,
         operation: impl FnOnce(&mut BTreeMap<String, HiddenSessionRecord>) -> Result<T>,
@@ -227,6 +261,10 @@ impl HiddenSessions {
             .records
             .lock()
             .expect("hidden-session registry mutex poisoned") = records;
+        *self
+            .stamp
+            .lock()
+            .expect("hidden-session stamp mutex poisoned") = file_stamp(&self.path);
         Ok(result)
     }
 }
@@ -514,6 +552,34 @@ mod tests {
         // The provider-shaped session value remains untouched throughout.
         assert_eq!(hidden.provider_session_id, "pi:host:old");
         assert_eq!(hidden.state, SessionState::Completed);
+    }
+
+    #[test]
+    fn a_hide_made_by_another_process_applies_without_a_restart() {
+        let directory = private_tempdir();
+        let path = directory.path().join("hidden-sessions.json");
+        let dashboard = HiddenSessions::load(&path).unwrap();
+        let cli = HiddenSessions::load(&path).unwrap();
+        let hidden = session("opencode:host:done");
+        let visible = session("opencode:host:working");
+        let snapshot = || SessionSnapshot {
+            sessions: vec![hidden.clone(), visible.clone()],
+            warnings: vec![],
+        };
+
+        let mut before = snapshot();
+        dashboard.filter_snapshot(&mut before);
+        assert_eq!(before.sessions.len(), 2);
+
+        cli.hide_id(&hidden.id).unwrap();
+        let mut after = snapshot();
+        dashboard.filter_snapshot(&mut after);
+        assert_eq!(after.sessions, vec![visible.clone()]);
+
+        cli.unhide(&hidden.id).unwrap();
+        let mut restored = snapshot();
+        dashboard.filter_snapshot(&mut restored);
+        assert_eq!(restored.sessions.len(), 2);
     }
 
     #[test]
