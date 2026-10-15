@@ -142,6 +142,7 @@ impl SessionSource for CopilotOwnedSource {
         Ok(SourceDiscovery {
             sessions: state.sessions.values().map(normalize_managed).collect(),
             warnings,
+            kept: Default::default(),
         })
     }
 }

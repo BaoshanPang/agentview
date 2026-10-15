@@ -1849,6 +1849,8 @@ fn render_hidden_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
                         app.picker_candidate_count(),
                         if app.restorable_loading {
                             " · loading saved sessions…"
+                        } else if app.restorable_text_loading {
+                            " · loading message text…"
                         } else {
                             ""
                         }

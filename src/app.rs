@@ -286,6 +286,8 @@ pub struct App {
     /// their message text matches, and choosing one selects its row.
     open_candidates: Vec<HiddenSessionRecord>,
     pub restorable_loading: bool,
+    /// Whether the picker still waits for the message text it searches.
+    pub restorable_text_loading: bool,
     pub models_loading: bool,
     pub models_provider: Option<Provider>,
     pub models_error: Option<String>,
@@ -390,6 +392,7 @@ impl App {
             hidden_ids: BTreeSet::new(),
             open_candidates: Vec::new(),
             restorable_loading: false,
+            restorable_text_loading: false,
             hidden_filter: String::new(),
             hidden_selection: 0,
             hidden_picker_rows: HIDDEN_PICKER_PAGE_SIZE,
@@ -833,6 +836,7 @@ impl App {
                 self.restorable.clear();
                 self.transcripts_lower.clear();
                 self.restorable_loading = false;
+                self.restorable_text_loading = false;
                 self.notice = None;
                 AppAction::None
             }
@@ -2485,6 +2489,7 @@ impl App {
             self.open_candidates = open;
         }
         self.restorable_loading = loading;
+        self.restorable_text_loading = loading;
         self.hidden_filter.clear();
         self.hidden_selection = 0;
         self.notice = None;
@@ -2540,6 +2545,25 @@ impl App {
                 self.set_notice("no hidden or older sessions to restore");
             }
             return;
+        }
+        self.reconcile_hidden_selection();
+    }
+
+    /// Merge message text into the open picker once its scan finishes, so the
+    /// filter can search it. Rows that are not in the picker are ignored.
+    pub fn add_restorable_transcripts(&mut self, transcripts: BTreeMap<String, String>) {
+        if self.overlay != Overlay::HiddenPicker {
+            return;
+        }
+        self.restorable_text_loading = false;
+        for (id, text) in transcripts {
+            if text.is_empty() {
+                continue;
+            }
+            if let Some(session) = self.restorable.get_mut(&id) {
+                self.transcripts_lower.insert(id, text.to_ascii_lowercase());
+                session.transcript = text;
+            }
         }
         self.reconcile_hidden_selection();
     }
@@ -2704,6 +2728,7 @@ impl App {
         self.restorable.clear();
         self.transcripts_lower.clear();
         self.restorable_loading = false;
+        self.restorable_text_loading = false;
         if open {
             if !self.snapshot_contains(&session_id) {
                 self.set_notice("that session is no longer listed");
@@ -4057,6 +4082,41 @@ mod tests {
             updated_at_ms: updated,
             transcript: String::new(),
         }
+    }
+
+    #[test]
+    fn restore_picker_lists_sessions_before_their_message_text_arrives() {
+        let mut app = app_with(Vec::new());
+        app.open_restore_picker(Vec::new());
+        app.add_restorable_sessions(
+            vec![restorable("ses_chat", "Picker polish", "/work/a", 90)],
+            &[],
+        );
+        assert!(app.restorable_text_loading);
+        for character in "upload".chars() {
+            app.push_input(character);
+        }
+        assert!(app.hidden_choices().is_empty());
+
+        app.add_restorable_transcripts(BTreeMap::from([
+            (
+                "opencode:host:ses_chat".to_owned(),
+                "retry the flaky Upload test".to_owned(),
+            ),
+            ("opencode:host:ses_gone".to_owned(), "upload".to_owned()),
+        ]));
+
+        assert!(!app.restorable_text_loading);
+        assert_eq!(
+            app.hidden_choices()
+                .iter()
+                .map(|record| record.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["opencode:host:ses_chat"]
+        );
+        assert!(app
+            .hidden_snippet_for("opencode:host:ses_chat", 60)
+            .is_some());
     }
 
     #[test]

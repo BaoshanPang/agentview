@@ -308,6 +308,19 @@ impl ProviderController for OpenCodeController {
         self.source.restorable_sessions()
     }
 
+    fn restorable_transcripts(&self) -> Result<BTreeMap<String, String>> {
+        if self.ownership.is_none() {
+            return Ok(BTreeMap::new());
+        }
+        let runtime_id = self.source.runtime_id();
+        Ok(self
+            .source
+            .restorable_transcripts()
+            .into_iter()
+            .map(|(id, text)| (format!("opencode:{runtime_id}:{id}"), text))
+            .collect())
+    }
+
     fn adopt(&self, session: &RestorableSession) -> Result<()> {
         if session.provider != Provider::OpenCode {
             bail!("the OpenCode controller cannot adopt another provider's session");
@@ -1307,9 +1320,15 @@ impl OpenCodeSource {
         if self.runtime == Runtime::Host {
             apply_holds(self.holds.as_deref(), sessions.values_mut());
         }
+        let kept = sessions
+            .values()
+            .filter(|session| owned.contains(&session.provider_session_id))
+            .map(|session| session.id.clone())
+            .collect();
         Ok(SourceDiscovery {
             sessions: sessions.into_values().collect(),
             warnings,
+            kept,
         })
     }
 }
@@ -1442,18 +1461,33 @@ impl OpenCodeSource {
 
 impl OpenCodeSource {
     /// The newest root sessions in OpenCode's whole history, for the restore
-    /// picker, minus sessions run in a temp directory. Sessions updated in the
-    /// last `RESTORE_TRANSCRIPT_WINDOW` also carry their message text so the
-    /// picker can search it.
+    /// picker, minus sessions run in a temp directory. Message text comes
+    /// from the last scan (see `restorable_transcripts`), because the scan is
+    /// too slow to wait for before showing the picker.
     fn restorable_sessions(&self) -> Result<Vec<RestorableSession>> {
-        let now_ms = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_millis() as u64)
-            .unwrap_or_default();
-        self.restorable_sessions_at(now_ms)
+        let mut sessions = self.restorable_sessions_at()?;
+        if let Some(cached) = restore_transcript_cache()
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&self.runtime_id()).cloned())
+        {
+            for session in &mut sessions {
+                if let Some(text) = cached.get(&session.provider_session_id) {
+                    session.transcript = text.clone();
+                }
+            }
+        }
+        Ok(sessions)
     }
 
-    fn restorable_sessions_at(&self, now_ms: u64) -> Result<Vec<RestorableSession>> {
+    fn runtime_id(&self) -> String {
+        match &self.runtime {
+            Runtime::Host => "host".into(),
+            Runtime::Docker { container_id, .. } => container_id.clone(),
+        }
+    }
+
+    fn restorable_sessions_at(&self) -> Result<Vec<RestorableSession>> {
         #[derive(Deserialize)]
         struct Row {
             id: String,
@@ -1461,31 +1495,13 @@ impl OpenCodeSource {
             directory: PathBuf,
             updated: u64,
         }
-        let since_ms = now_ms.saturating_sub(RESTORE_TRANSCRIPT_WINDOW.as_millis() as u64);
-        let transcripts_command = self.db_command(
-            format!(
-                "SELECT json_object('id', root, 'text', group_concat(text, char(10))) AS record FROM (SELECT COALESCE(s.parent_id, s.id) AS root, json_extract(p.data, '$.text') AS text FROM part p JOIN session s ON s.id = p.session_id WHERE p.time_created >= {since_ms} AND json_extract(p.data, '$.type') = 'text' AND json_extract(p.data, '$.synthetic') IS NOT 1 ORDER BY p.time_created) GROUP BY root"
-            ),
-            Duration::from_secs(20),
-        );
         let command = self.db_command(
             format!(
                 "SELECT json_object('id', id, 'title', title, 'directory', directory, 'updated', time_updated) AS record FROM session WHERE parent_id IS NULL ORDER BY time_updated DESC LIMIT {MAX_RESTORABLE_SESSIONS}"
             ),
             Duration::from_secs(8),
         );
-        // The text query is the slow one (a scan of every part), so it runs
-        // beside the metadata query instead of after it. Text is best effort:
-        // without it the picker still lists and searches names.
-        let runner = self.runner.clone();
-        let (output, transcripts) = std::thread::scope(|scope| {
-            let transcripts =
-                scope.spawn(move || transcripts_from(runner.run(&transcripts_command)));
-            let output = self.runner.run(&command);
-            (output, transcripts.join().unwrap_or_default())
-        });
-        let mut transcripts = transcripts;
-        let output = output?;
+        let output = self.runner.run(&command)?;
         if output.status != 0 {
             bail!(
                 "OpenCode history lookup exited with status {}: {}",
@@ -1493,10 +1509,7 @@ impl OpenCodeSource {
                 output.stderr_lossy()
             );
         }
-        let runtime_id = match &self.runtime {
-            Runtime::Host => "host",
-            Runtime::Docker { container_id, .. } => container_id,
-        };
+        let runtime_id = self.runtime_id();
         Ok(output
             .stdout_text()?
             .lines()
@@ -1505,7 +1518,7 @@ impl OpenCodeSource {
             .filter(|row| !is_throwaway_directory(&row.directory))
             .map(|row| RestorableSession {
                 id: format!("opencode:{runtime_id}:{}", row.id),
-                transcript: transcripts.remove(&row.id).unwrap_or_default(),
+                transcript: String::new(),
                 provider_session_id: row.id,
                 provider: Provider::OpenCode,
                 name: row.title,
@@ -1513,6 +1526,35 @@ impl OpenCodeSource {
                 updated_at_ms: row.updated,
             })
             .collect())
+    }
+
+    /// Message text of the sessions updated in the last
+    /// `RESTORE_TRANSCRIPT_WINDOW`, by provider session ID. The query reads
+    /// every message part, so it takes seconds on a large database; the result
+    /// is kept for the next time the picker opens.
+    fn restorable_transcripts_at(&self, now_ms: u64) -> BTreeMap<String, String> {
+        let since_ms = now_ms.saturating_sub(RESTORE_TRANSCRIPT_WINDOW.as_millis() as u64);
+        let command = self.db_command(
+            format!(
+                "SELECT json_object('id', root, 'text', group_concat(text, char(10))) AS record FROM (SELECT COALESCE(s.parent_id, s.id) AS root, json_extract(p.data, '$.text') AS text FROM part p JOIN session s ON s.id = p.session_id WHERE p.time_created >= {since_ms} AND json_extract(p.data, '$.type') = 'text' AND json_extract(p.data, '$.synthetic') IS NOT 1 ORDER BY p.time_created) GROUP BY root"
+            ),
+            Duration::from_secs(60),
+        );
+        transcripts_from(self.runner.run(&command))
+    }
+
+    fn restorable_transcripts(&self) -> BTreeMap<String, String> {
+        let now_ms = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or_default();
+        let transcripts = self.restorable_transcripts_at(now_ms);
+        if !transcripts.is_empty() {
+            if let Ok(mut cache) = restore_transcript_cache().lock() {
+                cache.insert(self.runtime_id(), transcripts.clone());
+            }
+        }
+        transcripts
     }
 
     fn db_command(&self, query: String, timeout: Duration) -> CommandRequest {
@@ -1966,6 +2008,13 @@ fn normalize_record(record: OpenCodeRecord, runtime: Runtime) -> AgentSession {
 }
 
 /// Root session ID to its message text, from the restore transcript query.
+/// Message text from the last transcript scan per runtime, so reopening the
+/// picker can search at once while a fresh scan runs.
+fn restore_transcript_cache() -> &'static Mutex<BTreeMap<String, BTreeMap<String, String>>> {
+    static CACHE: OnceLock<Mutex<BTreeMap<String, BTreeMap<String, String>>>> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
 fn transcripts_from(output: Result<crate::process::CommandOutput>) -> BTreeMap<String, String> {
     #[derive(Deserialize)]
     struct Transcript {
@@ -2693,21 +2742,17 @@ mod tests {
     const SESSION_ROWS: &str = "record\n{\"id\":\"ses_old\",\"title\":\"arca memory\",\"directory\":\"/work/arca\",\"updated\":7}\n{\"id\":\"ses_tmp\",\"title\":\"probe\",\"directory\":\"/tmp/probe\",\"updated\":6}\n{\"id\":\"ses_scratch\",\"title\":\"scratch\",\"directory\":\"/private/var/folders/x/T/repo\",\"updated\":5}\nnot json\n";
 
     #[test]
-    fn restorable_sessions_list_root_history_as_dashboard_rows_with_recent_text() {
+    fn restorable_sessions_list_root_history_as_dashboard_rows_without_waiting_for_text() {
         let runner = Arc::new(QueryRunner {
-            answers: vec![
-                ("FROM session WHERE parent_id IS NULL ORDER BY", Ok(SESSION_ROWS)),
-                (
-                    "group_concat",
-                    Ok("record\n{\"id\":\"ses_old\",\"text\":\"fix the\\nflaky test\"}\n{\"id\":\"ses_tmp\",\"text\":\"scratch\"}\n"),
-                ),
-            ],
+            answers: vec![(
+                "FROM session WHERE parent_id IS NULL ORDER BY",
+                Ok(SESSION_ROWS),
+            )],
             seen: Mutex::new(Vec::new()),
         });
-        let now_ms = 30 * 24 * 60 * 60 * 1000;
 
         let sessions = restorable_source(runner.clone())
-            .restorable_sessions_at(now_ms)
+            .restorable_sessions_at()
             .unwrap();
 
         assert_eq!(
@@ -2719,34 +2764,48 @@ mod tests {
                 name: "arca memory".into(),
                 cwd: PathBuf::from("/work/arca"),
                 updated_at_ms: 7,
-                transcript: "fix the\nflaky test".into(),
+                transcript: String::new(),
             }]
         );
-        let seen = runner.seen.lock().unwrap();
-        let text_query = seen
+        assert!(!runner
+            .seen
+            .lock()
+            .unwrap()
             .iter()
-            .find(|query| query.contains("group_concat"))
-            .unwrap();
-        assert!(text_query.contains(&format!("p.time_created >= {}", 16 * 24 * 60 * 60 * 1000)));
+            .any(|query| query.contains("group_concat")));
     }
 
     #[test]
-    fn restorable_sessions_still_list_when_the_text_query_fails() {
+    fn restorable_transcripts_cover_the_recent_window() {
         let runner = Arc::new(QueryRunner {
-            answers: vec![
-                (
-                    "FROM session WHERE parent_id IS NULL ORDER BY",
-                    Ok(SESSION_ROWS),
-                ),
-                ("group_concat", Err(())),
-            ],
+            answers: vec![(
+                "group_concat",
+                Ok("record\n{\"id\":\"ses_old\",\"text\":\"fix the\\nflaky test\"}\n"),
+            )],
+            seen: Mutex::new(Vec::new()),
+        });
+        let now_ms = 30 * 24 * 60 * 60 * 1000;
+
+        let transcripts = restorable_source(runner.clone()).restorable_transcripts_at(now_ms);
+
+        assert_eq!(
+            transcripts,
+            BTreeMap::from([("ses_old".to_owned(), "fix the\nflaky test".to_owned())])
+        );
+        let seen = runner.seen.lock().unwrap();
+        assert!(seen[0].contains(&format!("p.time_created >= {}", 16 * 24 * 60 * 60 * 1000)));
+    }
+
+    #[test]
+    fn restorable_transcripts_are_empty_when_the_text_query_fails() {
+        let runner = Arc::new(QueryRunner {
+            answers: vec![("group_concat", Err(()))],
             seen: Mutex::new(Vec::new()),
         });
 
-        let sessions = restorable_source(runner).restorable_sessions_at(0).unwrap();
-
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].transcript, "");
+        assert!(restorable_source(runner)
+            .restorable_transcripts_at(0)
+            .is_empty());
     }
 
     #[cfg(unix)]

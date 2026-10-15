@@ -212,6 +212,8 @@ pub fn run_dashboard(
     let (launch_tx, launch_rx) = mpsc::channel::<LaunchWorkerResult>();
     let (migration_tx, migration_rx) = mpsc::channel::<MigrationWorkerResult>();
     let (restorable_tx, restorable_rx) = mpsc::channel::<(Vec<RestorableSession>, Vec<String>)>();
+    let (transcripts_tx, transcripts_rx) =
+        mpsc::channel::<std::collections::BTreeMap<String, String>>();
     let worker_engine = (*engine).clone();
     let worker_control = control.clone();
     let worker_hidden_sessions = hidden_sessions.clone();
@@ -465,6 +467,10 @@ pub fn run_dashboard(
         }
         while let Ok((sessions, errors)) = restorable_rx.try_recv() {
             app.add_restorable_sessions(sessions, &errors);
+            needs_draw = true;
+        }
+        while let Ok(transcripts) = transcripts_rx.try_recv() {
+            app.add_restorable_transcripts(transcripts);
             needs_draw = true;
         }
         let mut completed_launch_needs_refresh = false;
@@ -851,8 +857,11 @@ pub fn run_dashboard(
                                 app.open_restore_picker(hidden_sessions.list());
                                 let worker_control = control.clone();
                                 let sender = restorable_tx.clone();
+                                let transcripts_sender = transcripts_tx.clone();
                                 let _restorable_worker = thread::spawn(move || {
                                     let _ = sender.send(worker_control.restorable_sessions());
+                                    let _ = transcripts_sender
+                                        .send(worker_control.restorable_transcripts());
                                 });
                                 ActionEffect::default()
                             }

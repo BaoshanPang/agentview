@@ -208,6 +208,13 @@ pub trait ProviderController: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Message text for the restore picker to search, by `RestorableSession`
+    /// ID. Slow providers return it here after `restorable_sessions` so the
+    /// picker can open first.
+    fn restorable_transcripts(&self) -> Result<BTreeMap<String, String>> {
+        Ok(BTreeMap::new())
+    }
+
     /// Start the provider's native client behind the dashboard so the first
     /// open does not wait for it to load.
     fn warm_native_client(&self) -> Result<()> {
@@ -688,6 +695,21 @@ impl ControlHub {
         }
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at_ms));
         (sessions, errors)
+    }
+
+    /// Every provider's message text for the restore picker, by
+    /// `RestorableSession` ID. Slow, so it runs after `restorable_sessions`.
+    pub fn restorable_transcripts(&self) -> BTreeMap<String, String> {
+        let mut transcripts = BTreeMap::new();
+        if self.ensure_provider_io().is_err() {
+            return transcripts;
+        }
+        for controller in self.controllers.values() {
+            if let Ok(found) = controller.restorable_transcripts() {
+                transcripts.extend(found);
+            }
+        }
+        transcripts
     }
 
     /// Show `session` in its provider's hidden native client in the

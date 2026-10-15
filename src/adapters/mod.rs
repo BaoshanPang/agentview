@@ -127,6 +127,10 @@ impl Default for DiscoveryRequest {
 pub struct SourceDiscovery {
     pub sessions: Vec<AgentSession>,
     pub warnings: Vec<String>,
+    /// IDs of sessions the source lists on purpose, such as ones the user
+    /// brought back from old history. The completed-history bound never
+    /// drops them.
+    pub kept: std::collections::BTreeSet<String>,
 }
 
 pub trait SessionSource: Send + Sync {
@@ -136,6 +140,7 @@ pub trait SessionSource: Send + Sync {
         Ok(SourceDiscovery {
             sessions: self.discover(request)?,
             warnings: Vec::new(),
+            kept: Default::default(),
         })
     }
     fn cancel(&self) {}
@@ -227,7 +232,11 @@ impl DiscoveryEngine {
                         discovered
                             .sessions
                             .retain(|session| session_matches_request(session, request));
-                        if bound_completed_history(&mut discovered.sessions, request) {
+                        if bound_completed_history(
+                            &mut discovered.sessions,
+                            &discovered.kept,
+                            request,
+                        ) {
                             discovered.warnings.push(format!(
                                 "{label} completed history is limited to {} records for this refresh; increase --history-limit to load more",
                                 request.history_limit.max(1)
@@ -365,7 +374,11 @@ fn deduplicate_sessions(sessions: &mut Vec<AgentSession>) {
     sessions.extend(unique.into_values());
 }
 
-fn bound_completed_history(sessions: &mut Vec<AgentSession>, request: &DiscoveryRequest) -> bool {
+fn bound_completed_history(
+    sessions: &mut Vec<AgentSession>,
+    kept: &std::collections::BTreeSet<String>,
+    request: &DiscoveryRequest,
+) -> bool {
     if !request.include_completed {
         return false;
     }
@@ -373,7 +386,9 @@ fn bound_completed_history(sessions: &mut Vec<AgentSession>, request: &Discovery
     let mut completed = sessions
         .iter()
         .enumerate()
-        .filter(|(_, session)| session.state == SessionState::Completed)
+        .filter(|(_, session)| {
+            session.state == SessionState::Completed && !kept.contains(&session.id)
+        })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     if completed.len() <= limit {
@@ -398,7 +413,9 @@ fn bound_completed_history(sessions: &mut Vec<AgentSession>, request: &Discovery
         .map(|index| sessions[index].id.clone())
         .collect::<std::collections::BTreeSet<_>>();
     sessions.retain(|session| {
-        session.state != SessionState::Completed || retained.contains(&session.id)
+        session.state != SessionState::Completed
+            || kept.contains(&session.id)
+            || retained.contains(&session.id)
     });
     true
 }
@@ -442,6 +459,8 @@ mod tests {
     struct UnfilteredSource;
 
     struct CompletedHistorySource;
+
+    struct KeptHistorySource;
 
     impl SessionSource for BrokenSource {
         fn label(&self) -> &str {
@@ -720,6 +739,44 @@ mod tests {
         });
 
         assert_eq!(snapshot.sessions.len(), 4);
+    }
+
+    impl SessionSource for KeptHistorySource {
+        fn label(&self) -> &str {
+            "kept-history"
+        }
+
+        fn discover(&self, request: &DiscoveryRequest) -> Result<Vec<AgentSession>> {
+            CompletedHistorySource.discover(request)
+        }
+
+        fn discover_with_warnings(&self, request: &DiscoveryRequest) -> Result<SourceDiscovery> {
+            Ok(SourceDiscovery {
+                sessions: self.discover(request)?,
+                warnings: Vec::new(),
+                kept: BTreeSet::from(["history:host:0".to_owned()]),
+            })
+        }
+    }
+
+    #[test]
+    fn engine_keeps_sessions_a_provider_lists_on_purpose_beyond_the_history_budget() {
+        let mut engine = DiscoveryEngine::new();
+        engine.add_source(KeptHistorySource);
+
+        let snapshot = engine.discover(&DiscoveryRequest {
+            include_completed: true,
+            history_limit: 2,
+            ..DiscoveryRequest::default()
+        });
+
+        let mut ids = snapshot
+            .sessions
+            .iter()
+            .map(|session| session.provider_session_id.as_str())
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["0", "3", "4"]);
     }
 
     #[test]

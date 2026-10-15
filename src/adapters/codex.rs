@@ -121,6 +121,7 @@ impl CodexSource {
             return Ok(SourceDiscovery {
                 sessions,
                 warnings: Vec::new(),
+                kept: Default::default(),
             });
         }
 
@@ -149,6 +150,7 @@ impl CodexSource {
             return Ok(SourceDiscovery {
                 sessions,
                 warnings: Vec::new(),
+                kept: Default::default(),
             });
         }
 
@@ -208,6 +210,7 @@ impl CodexSource {
         Ok(SourceDiscovery {
             sessions: records,
             warnings,
+            kept: Default::default(),
         })
     }
 

@@ -359,7 +359,11 @@ impl SessionSource for QwenSource {
                 capabilities: BTreeSet::from([Capability::Inspect]),
             });
         }
-        Ok(SourceDiscovery { sessions, warnings })
+        Ok(SourceDiscovery {
+            sessions,
+            warnings,
+            kept: Default::default(),
+        })
     }
 
     fn cancel(&self) {
