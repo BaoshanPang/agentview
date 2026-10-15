@@ -367,7 +367,7 @@ fn render_session_row(
     // instead of requiring users to decode the old C@H/X@D-style marker.
     // Runtime details remain available in Peek.
     let provider_width = 14;
-    let base_name_width = if width >= 140 {
+    let base_name_width: usize = if width >= 140 {
         44
     } else if width >= 120 {
         38
@@ -380,11 +380,13 @@ fn render_session_row(
     } else {
         10
     };
+    let indent = 2 * depth.min(crate::session_tree::MAX_VISIBLE_DEPTH);
     let name_width = if show_provider {
         base_name_width
     } else {
         base_name_width + provider_width
-    };
+    }
+    .saturating_sub(indent);
     let provider_column = if show_provider {
         format!(
             "{} ",
@@ -428,19 +430,17 @@ fn render_session_row(
         format!("{prs:>7} {age:>5}")
     };
     let name_gap = if width >= 70 { "   " } else { " " };
-    let fixed =
-        3 + name_gap.len() + name_width + display_width(&provider_column) + display_width(&right);
+    let fixed = indent
+        + 3
+        + name_gap.len()
+        + name_width
+        + display_width(&provider_column)
+        + display_width(&right);
     let summary_width = (width as usize).saturating_sub(fixed).max(1);
-    // A spawned session hangs under the one that started it.
-    let indent = depth.min(crate::session_tree::MAX_VISIBLE_DEPTH);
-    let name_text = if indent > 0 {
-        format!("{}└ {}", "  ".repeat(indent - 1), session.name)
-    } else {
-        session.name.clone()
-    };
-    let name = pad_to_width(truncate(&name_text, name_width), name_width);
+    // Indent the status marker with its session, keeping later columns aligned.
+    let name = pad_to_width(truncate(&session.name, name_width), name_width);
     let mut spans = vec![
-        Span::styled(format!(" {symbol} "), symbol_style),
+        Span::styled(format!("{} {symbol} ", " ".repeat(indent)), symbol_style),
         Span::raw(name),
         Span::styled(
             format!("{name_gap}{provider_column}"),
@@ -2686,6 +2686,40 @@ mod tests {
         terminal.draw(|frame| render(frame, &app)).unwrap();
         let peek = buffer_text(terminal.backend().buffer());
         assert!(peek.contains("worker · Codex · long-container-name"));
+    }
+
+    #[test]
+    fn child_indentation_moves_status_marker_and_keeps_columns_aligned() {
+        let item = session("job", SessionState::Completed);
+        for width in [40, 70, 120, 160] {
+            for show_provider in [false, true] {
+                let text = |depth| {
+                    render_session_row(
+                        &item,
+                        ViewMode::Directory,
+                        width,
+                        show_provider,
+                        false,
+                        true,
+                        None,
+                        depth,
+                    )
+                    .spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+                };
+                let root = text(0);
+                for depth in 1..=crate::session_tree::MAX_VISIBLE_DEPTH {
+                    let child = text(depth);
+                    assert_eq!(child.find('•'), root.find('•').map(|x| x + depth * 2));
+                    assert_eq!(child.find("job"), root.find("job").map(|x| x + depth * 2));
+                    assert_eq!(child.find("Done"), root.find("Done"));
+                    assert_eq!(display_width(&child), display_width(&root));
+                    assert!(!child.contains('└'));
+                }
+            }
+        }
     }
 
     #[test]
