@@ -1998,10 +1998,10 @@ fn render_directory_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
 /// Extra rows the headings and separators add to one page of choices, or 0 when the
 /// page holds fewer than two groups. The default entry has no heading, only a
 /// separator.
-fn model_group_rows(choices: &[(&str, Option<&str>)], start: usize, rows: usize) -> usize {
+fn model_group_rows(choices: &[(String, Option<&str>)], start: usize, rows: usize) -> usize {
     let mut groups: Vec<&str> = Vec::new();
     for (group, _) in choices.iter().skip(start).take(rows) {
-        if groups.last() != Some(group) {
+        if groups.last() != Some(&group.as_str()) {
             groups.push(group);
         }
     }
@@ -2134,46 +2134,52 @@ fn render_model_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
             );
         }
     } else {
-        let mut previous_provider: Option<&str> = None;
+        let mut previous_heading: Option<&str> = None;
         let grouped = group_rows > 0;
         let rows = choices
             .iter()
             .enumerate()
             .skip(start)
             .take(visible_rows)
-            .flat_map(|(index, (provider, model))| {
-                let provider = *provider;
+            .flat_map(|(index, (heading, model))| {
+                let heading = heading.as_str();
                 let mut rows: Vec<Line<'static>> = Vec::new();
-                if grouped && previous_provider != Some(provider) {
-                    if previous_provider.is_some() {
+                if grouped && previous_heading != Some(heading) {
+                    if previous_heading.is_some() {
                         rows.push(Line::from(""));
                     }
-                    if !provider.is_empty() {
+                    if !heading.is_empty() {
                         rows.push(Line::from(Span::styled(
-                            format!(" {}", sanitize_inline(provider)),
-                            Style::default().fg(palette().dim),
+                            format!(" {}", sanitize_inline(heading)),
+                            Style::default()
+                                .fg(palette().accent)
+                                .add_modifier(Modifier::BOLD),
                         )));
                     }
-                    previous_provider = Some(provider);
+                    previous_heading = Some(heading);
                 }
                 rows.push({
                     let selected = index == app.model_selection;
-                    let label = match model {
-                        None if terminal_shells => "Default shell".to_owned(),
-                        None => "Default".to_owned(),
-                        Some(value) => crate::adapters::shell_install_name(value)
-                            .filter(|_| terminal_shells)
-                            .map(|shell| format!("{shell} · install"))
-                            .unwrap_or_else(|| (*value).to_owned()),
+                    // Pinned rows name the provider after the model, since
+                    // their heading may not (OpenCode: "Claude Opus 5.5
+                    // Anthropic"); catalog rows sit under their provider.
+                    let pinned = heading.starts_with("Recent") || heading == "Favorites";
+                    let (label, provider) = match model {
+                        None if terminal_shells => ("Default shell".to_owned(), ""),
+                        None => ("Default".to_owned(), ""),
+                        Some(value) if terminal_shells => (
+                            crate::adapters::shell_install_name(value)
+                                .map(|shell| format!("{shell} · install"))
+                                .unwrap_or_else(|| (*value).to_owned()),
+                            "",
+                        ),
+                        Some(value) => {
+                            let (title, provider) = app.model_display(value);
+                            (title.to_owned(), if pinned { provider } else { "" })
+                        }
                     };
                     let current = *model == app.launch_model.as_deref();
-                    Line::from(format!(
-                        " {} {}{}",
-                        if selected { "›" } else { " " },
-                        sanitize_inline(&label),
-                        if current { " · current" } else { "" }
-                    ))
-                    .style(if selected {
+                    let style = if selected {
                         Style::default()
                             .bg(palette().selected_bg)
                             .fg(palette().selected_fg)
@@ -2182,7 +2188,27 @@ fn render_model_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
                         Style::default().bg(palette().bg).fg(palette().accent)
                     } else {
                         Style::default().bg(palette().bg).fg(palette().fg)
-                    })
+                    };
+                    let marker = if current {
+                        "●"
+                    } else if selected {
+                        "›"
+                    } else {
+                        " "
+                    };
+                    let mut spans =
+                        vec![Span::raw(format!(" {marker} {}", sanitize_inline(&label)))];
+                    if !provider.is_empty() {
+                        spans.push(Span::styled(
+                            format!(" {}", sanitize_inline(provider)),
+                            if selected {
+                                Style::default()
+                            } else {
+                                Style::default().fg(palette().dim)
+                            },
+                        ));
+                    }
+                    Line::from(spans).style(style)
                 });
                 rows
             })
@@ -3811,10 +3837,27 @@ mod tests {
             .collect();
         let recent = rows
             .iter()
-            .position(|row| *row == "Recent")
-            .unwrap_or_else(|| panic!("no Recent heading in {text}"));
-        assert!(rows[recent + 1].contains("openai/gpt-6.1-sol"));
-        assert!(rows[recent + 3] == "anthropic");
+            .position(|row| *row == "Recent · openai")
+            .unwrap_or_else(|| panic!("no Recent · openai heading in {text}"));
+        assert_eq!(rows[recent + 1], "gpt-6.1-sol openai");
+        assert_eq!(rows[recent + 3], "anthropic");
+        assert_eq!(rows[recent + 4], "claude-opus-5-5");
+
+        app.set_model_labels(
+            Provider::OpenCode,
+            crate::model_catalog::ModelLabels::from([(
+                "openai/gpt-6.1-sol".into(),
+                crate::model_catalog::ModelLabel {
+                    name: "GPT-6.1 Sol".into(),
+                    provider: "OpenAI".into(),
+                    release: String::new(),
+                },
+            )]),
+        );
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let text = buffer_text(terminal.backend().buffer());
+        assert!(text.contains("Recent · OpenAI"), "{text}");
+        assert!(text.contains("GPT-6.1 Sol OpenAI"), "{text}");
     }
 
     #[test]

@@ -27,7 +27,23 @@ struct CacheDocument {
     version: u32,
     #[serde(default)]
     models: BTreeMap<Provider, Vec<String>>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    labels: BTreeMap<Provider, ModelLabels>,
 }
+
+/// How a harness names a model in its own picker: OpenCode shows
+/// "Claude Opus 5.5" under "Anthropic" rather than `anthropic/claude-opus-5-5`.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ModelLabel {
+    pub name: String,
+    pub provider: String,
+    /// `YYYY-MM-DD`, or empty when unknown; sorts newest first in a group.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub release: String,
+}
+
+/// Display labels keyed by model id.
+pub type ModelLabels = BTreeMap<String, ModelLabel>;
 
 #[derive(Clone, Debug)]
 pub struct ModelCache {
@@ -55,13 +71,41 @@ impl ModelCache {
         self.document().models
     }
 
+    pub fn all_labels(&self) -> BTreeMap<Provider, ModelLabels> {
+        self.document().labels
+    }
+
     pub fn save(&self, provider: &Provider, models: &[String]) -> Result<()> {
+        self.save_with_labels(provider, models, None)
+    }
+
+    /// Save the catalog and, when given, its display labels. `None` keeps
+    /// the labels already saved, so a fallback listing that has no names does
+    /// not erase the ones the server reported earlier.
+    pub fn save_with_labels(
+        &self,
+        provider: &Provider,
+        models: &[String],
+        labels: Option<&ModelLabels>,
+    ) -> Result<()> {
         let mut document = self.document();
-        if document.models.get(provider).map(Vec::as_slice) == Some(models) {
+        let same_models = document.models.get(provider).map(Vec::as_slice) == Some(models);
+        let same_labels = match labels {
+            None => true,
+            Some(labels) => document.labels.get(provider).unwrap_or(&ModelLabels::new()) == labels,
+        };
+        if same_models && same_labels {
             return Ok(());
         }
         document.version = CACHE_VERSION;
         document.models.insert(provider.clone(), models.to_vec());
+        if let Some(labels) = labels {
+            if labels.is_empty() {
+                document.labels.remove(provider);
+            } else {
+                document.labels.insert(provider.clone(), labels.clone());
+            }
+        }
         crate::fs_util::write_private_json(&self.path, &document)
     }
 }
@@ -166,6 +210,26 @@ mod tests {
         let all = ModelCache::at(cache.path.clone()).all();
         assert_eq!(all[&Provider::OpenCode], vec!["anthropic/claude-opus-5-5"]);
         assert_eq!(all[&Provider::Claude], vec!["opus"]);
+    }
+
+    #[test]
+    fn cached_labels_survive_a_restart_and_a_listing_without_names() {
+        let directory = crate::test_support::tempfile::tempdir().unwrap();
+        let cache = ModelCache::at(directory.path().join("model-cache.json"));
+        let labels = ModelLabels::from([(
+            "anthropic/claude-opus-5-5".to_owned(),
+            ModelLabel {
+                name: "Claude Opus 5.5".into(),
+                provider: "Anthropic".into(),
+                release: "2026-09-22".into(),
+            },
+        )]);
+        let models = vec!["anthropic/claude-opus-5-5".to_owned()];
+        cache
+            .save_with_labels(&Provider::OpenCode, &models, Some(&labels))
+            .unwrap();
+        cache.save(&Provider::OpenCode, &models).unwrap();
+        assert_eq!(cache.all_labels()[&Provider::OpenCode], labels);
     }
 
     #[test]

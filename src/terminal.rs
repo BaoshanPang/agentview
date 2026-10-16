@@ -208,7 +208,7 @@ pub fn run_dashboard(
     } = migrations;
     let (refresh_tx, refresh_rx) = mpsc::sync_channel(1);
     let (snapshot_tx, snapshot_rx) = mpsc::channel::<(SessionSnapshot, bool)>();
-    let (models_tx, models_rx) = mpsc::channel::<(Provider, bool, Result<Vec<String>, String>)>();
+    let (models_tx, models_rx) = mpsc::channel::<ModelLoad>();
     let (launch_tx, launch_rx) = mpsc::channel::<LaunchWorkerResult>();
     let (migration_tx, migration_rx) = mpsc::channel::<MigrationWorkerResult>();
     let (restorable_tx, restorable_rx) = mpsc::channel::<(Vec<RestorableSession>, Vec<String>)>();
@@ -300,6 +300,7 @@ pub fn run_dashboard(
     let opencode_models = crate::model_catalog::OpenCodeModelState::load_default().ok();
     if let Some(cache) = &model_cache {
         app.model_cache = cache.all();
+        app.model_labels = cache.all_labels();
     }
     if let Some(state) = &opencode_models {
         app.set_opencode_pins(state.pins());
@@ -449,11 +450,25 @@ pub fn run_dashboard(
             match models_rx.try_recv() {
                 Ok((provider, auth_available, result)) => {
                     app.set_models_auth_available(&provider, auth_available);
+                    // Labels with no models came from a failed load; keep the
+                    // saved ones rather than blanking every name.
+                    let (result, labels) = match result {
+                        Ok((models, labels)) => {
+                            let labels = (!labels.is_empty()).then_some(labels);
+                            (Ok(models), labels)
+                        }
+                        Err(error) => (Err(error), None),
+                    };
+                    if let Some(labels) = &labels {
+                        app.set_model_labels(provider.clone(), labels.clone());
+                    }
                     app.set_available_models(provider.clone(), result);
                     if let (Some(cache), Some(models)) =
                         (&model_cache, app.model_cache.get(&provider))
                     {
-                        if let Err(error) = cache.save(&provider, models) {
+                        if let Err(error) =
+                            cache.save_with_labels(&provider, models, labels.as_ref())
+                        {
                             crate::perf!("models", "failed to cache models: {error:#}");
                         }
                     }
@@ -1250,15 +1265,19 @@ fn remember_model_change(
     }
 }
 
-fn schedule_model_load(
-    control: ControlHub,
-    provider: Provider,
-    sender: mpsc::Sender<(Provider, bool, Result<Vec<String>, String>)>,
-) {
+/// A finished model listing: the harness, whether it offers a login, and its
+/// models with display labels.
+type ModelLoad = (
+    Provider,
+    bool,
+    Result<(Vec<String>, crate::model_catalog::ModelLabels), String>,
+);
+
+fn schedule_model_load(control: ControlHub, provider: Provider, sender: mpsc::Sender<ModelLoad>) {
     let _model_worker = thread::spawn(move || {
         let auth_available = control.supports_authentication(&provider);
         let result = control
-            .available_models(&provider)
+            .labeled_models(&provider)
             .map_err(|error| format!("{error:#}"));
         let _ = sender.send((provider, auth_available, result));
     });

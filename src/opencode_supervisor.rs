@@ -329,7 +329,10 @@ impl OpenCodeSupervisor {
     /// already holds in memory. `None` when no server is up, so the caller can
     /// fall back to `opencode models`, which boots a whole new process.
     /// Never starts a server.
-    pub fn available_models(&self, cwd: &Path) -> Result<Option<Vec<String>>> {
+    pub fn available_models(
+        &self,
+        cwd: &Path,
+    ) -> Result<Option<(Vec<String>, crate::model_catalog::ModelLabels)>> {
         let Some(record) = self.live_record()? else {
             return Ok(None);
         };
@@ -1851,12 +1854,17 @@ fn limit_chars(value: String, limit: usize) -> String {
     format!("[earlier output omitted]\n{tail}")
 }
 
-fn parse_config_providers(catalog: &Value) -> Result<Vec<String>> {
+/// Every model id the server can run, with the names OpenCode's own picker
+/// shows for it. Deprecated models are left out, as OpenCode's picker does.
+fn parse_config_providers(
+    catalog: &Value,
+) -> Result<(Vec<String>, crate::model_catalog::ModelLabels)> {
     let providers = catalog
         .get("providers")
         .and_then(Value::as_array)
         .context("OpenCode /config/providers returned no provider list")?;
     let mut models = BTreeSet::new();
+    let mut labels = crate::model_catalog::ModelLabels::new();
     for provider in providers {
         let Some(id) = provider.get("id").and_then(Value::as_str) else {
             continue;
@@ -1864,11 +1872,36 @@ fn parse_config_providers(catalog: &Value) -> Result<Vec<String>> {
         let Some(entries) = provider.get("models").and_then(Value::as_object) else {
             continue;
         };
-        for model in entries.keys() {
-            models.insert(format!("{id}/{model}"));
+        let provider_name = provider
+            .get("name")
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or(id);
+        for (model, info) in entries {
+            if info.get("status").and_then(Value::as_str) == Some("deprecated") {
+                continue;
+            }
+            let key = format!("{id}/{model}");
+            let text = |field: &str| {
+                info.get(field)
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .to_owned()
+            };
+            let name = text("name");
+            labels.insert(
+                key.clone(),
+                crate::model_catalog::ModelLabel {
+                    name: if name.is_empty() { model.clone() } else { name },
+                    provider: provider_name.to_owned(),
+                    release: text("release_date"),
+                },
+            );
+            models.insert(key);
         }
     }
-    Ok(models.into_iter().collect())
+    Ok((models.into_iter().collect(), labels))
 }
 
 fn with_directory_query(path: &str, cwd: &Path) -> String {
@@ -2644,6 +2677,24 @@ mod tests {
     fn encodes_basic_auth_and_url_components() {
         assert_eq!(base64_encode(b"opencode:secret"), "b3BlbmNvZGU6c2VjcmV0");
         assert_eq!(url_path_segment("ses_/ ?"), "ses_%2F%20%3F");
+    }
+
+    #[test]
+    fn config_providers_yield_ids_and_picker_names_without_deprecated_models() {
+        let catalog = serde_json::json!({"providers": [
+            {"id": "anthropic", "name": "Anthropic", "models": {
+                "claude-opus-5-5": {"name": "Claude Opus 5.5", "release_date": "2026-09-22", "status": "active"},
+                "claude-old": {"name": "Claude Old", "status": "deprecated"},
+            }},
+            {"id": "cursor", "name": "", "models": {"auto": {}}},
+        ]});
+        let (models, labels) = parse_config_providers(&catalog).unwrap();
+        assert_eq!(models, vec!["anthropic/claude-opus-5-5", "cursor/auto"]);
+        assert_eq!(labels["anthropic/claude-opus-5-5"].name, "Claude Opus 5.5");
+        assert_eq!(labels["anthropic/claude-opus-5-5"].provider, "Anthropic");
+        assert_eq!(labels["anthropic/claude-opus-5-5"].release, "2026-09-22");
+        assert_eq!(labels["cursor/auto"].name, "auto");
+        assert_eq!(labels["cursor/auto"].provider, "cursor");
     }
 
     #[test]

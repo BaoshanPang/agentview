@@ -136,6 +136,12 @@ pub trait ProviderController: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// `available_models` plus the names the harness's own picker shows, for
+    /// harnesses that report them. Missing labels fall back to the id.
+    fn labeled_models(&self) -> Result<(Vec<String>, crate::model_catalog::ModelLabels)> {
+        Ok((self.available_models()?, Default::default()))
+    }
+
     /// Perform an explicit setup action offered by a launch-option picker.
     /// Terminal uses this for missing shells; providers otherwise keep this
     /// unavailable rather than interpreting model text as an installer.
@@ -450,6 +456,18 @@ impl ControlHub {
             bail!("{} does not expose model selection", provider.label());
         }
         controller.available_models()
+    }
+
+    pub fn labeled_models(
+        &self,
+        provider: &Provider,
+    ) -> Result<(Vec<String>, crate::model_catalog::ModelLabels)> {
+        self.ensure_provider_io()?;
+        let controller = self.controller(provider)?;
+        if controller.launch_mode() != LaunchMode::SelectableModel {
+            bail!("{} does not expose model selection", provider.label());
+        }
+        controller.labeled_models()
     }
 
     pub fn setup_launch_option(&self, provider: &Provider, option: &str) -> Result<ControlOutcome> {

@@ -195,6 +195,10 @@ impl ProviderController for OpenCodeController {
         self.source.available_models()
     }
 
+    fn labeled_models(&self) -> Result<(Vec<String>, crate::model_catalog::ModelLabels)> {
+        self.source.labeled_models()
+    }
+
     fn supports_authentication(&self) -> bool {
         true
     }
@@ -1075,11 +1079,17 @@ impl OpenCodeSource {
     }
 
     fn available_models(&self) -> Result<Vec<String>> {
+        self.labeled_models().map(|(models, _)| models)
+    }
+
+    /// The catalog plus OpenCode's display names. Names come only from a
+    /// live server; the `opencode models` fallback lists bare ids.
+    fn labeled_models(&self) -> Result<(Vec<String>, crate::model_catalog::ModelLabels)> {
         if let Some(supervisor) = &self.supervisor {
             let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-            if let Ok(Some(models)) = supervisor.available_models(&cwd) {
+            if let Ok(Some((models, labels))) = supervisor.available_models(&cwd) {
                 if !models.is_empty() {
-                    return Ok(models);
+                    return Ok((models, labels));
                 }
             }
         }
@@ -1101,7 +1111,10 @@ impl OpenCodeSource {
         if output.stdout.len() > MAX_MODEL_CATALOG_BYTES {
             bail!("OpenCode model catalog exceeded the 4 MiB safety limit");
         }
-        parse_opencode_models(output.stdout_text()?)
+        Ok((
+            parse_opencode_models(output.stdout_text()?)?,
+            Default::default(),
+        ))
     }
 
     /// Render a persisted session transcript using OpenCode's read-only export

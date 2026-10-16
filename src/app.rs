@@ -298,6 +298,8 @@ pub struct App {
     pub models_auth_available: bool,
     /// Last model list per harness, shown at once while a fresh one loads.
     pub model_cache: BTreeMap<Provider, Vec<String>>,
+    /// Display names per harness, keyed by model id (OpenCode only so far).
+    pub model_labels: BTreeMap<Provider, crate::model_catalog::ModelLabels>,
     /// OpenCode's favorite and recent models, pinned above the catalog.
     pub opencode_pins: crate::model_catalog::OpenCodePins,
     pub collapsed: BTreeSet<String>,
@@ -408,6 +410,7 @@ impl App {
             models_error: None,
             models_auth_available: false,
             model_cache: BTreeMap::new(),
+            model_labels: BTreeMap::new(),
             opencode_pins: Default::default(),
             collapsed: BTreeSet::from([PAUSED_GROUP_KEY.to_owned()]),
             visible_limits: BTreeMap::new(),
@@ -1182,12 +1185,31 @@ impl App {
         if self.opencode_pins == pins {
             return;
         }
+        self.keeping_model_selection(|app| app.opencode_pins = pins);
+    }
+
+    /// Replace a harness's display labels, keeping the selected row on the
+    /// same model (labels decide the order of the list).
+    pub fn set_model_labels(
+        &mut self,
+        provider: Provider,
+        labels: crate::model_catalog::ModelLabels,
+    ) {
+        if self.model_labels.get(&provider) == Some(&labels) {
+            return;
+        }
+        self.keeping_model_selection(|app| {
+            app.model_labels.insert(provider, labels);
+        });
+    }
+
+    fn keeping_model_selection(&mut self, change: impl FnOnce(&mut Self)) {
         let selected = self
             .model_choices()
             .get(self.model_selection)
             .copied()
             .map(|choice| choice.map(ToOwned::to_owned));
-        self.opencode_pins = pins;
+        change(self);
         if let Some(selected) = selected {
             self.model_selection = self
                 .model_choices()
@@ -1244,36 +1266,113 @@ impl App {
             .collect()
     }
 
-    /// Each choice with the heading it sits under: "Favorite" or "Recent"
-    /// for OpenCode's pinned models, otherwise the model's provider. The
-    /// default entry's heading is empty. Pins are left out while filtering
-    /// so a search lists each match once.
-    pub fn grouped_model_choices(&self) -> Vec<(&str, Option<&str>)> {
-        let needle = self.model_filter.to_ascii_lowercase();
+    /// How a model reads in the picker: its name and the provider serving
+    /// it, as OpenCode's own picker shows them ("Claude Opus 5.5",
+    /// "Anthropic"). Without a label OpenCode ids split at the slash and
+    /// other harnesses show the id with no provider.
+    pub fn model_display<'a>(&'a self, model: &'a str) -> (&'a str, &'a str) {
+        if let Some(label) = self
+            .model_labels
+            .get(&self.launch_provider)
+            .and_then(|labels| labels.get(model))
+        {
+            return (&label.name, &label.provider);
+        }
+        if self.launch_provider == Provider::OpenCode {
+            if let Some((provider, id)) = model.split_once('/') {
+                return (id, provider);
+            }
+        }
+        (model, "")
+    }
+
+    fn model_release(&self, model: &str) -> &str {
+        self.model_labels
+            .get(&self.launch_provider)
+            .and_then(|labels| labels.get(model))
+            .map_or("", |label| label.release.as_str())
+    }
+
+    /// Each choice with the heading it sits under. OpenCode's list matches
+    /// its own picker: "Favorites", then recents grouped by provider
+    /// ("Recent · Anthropic") and sorted by name, then every other model
+    /// under its provider, newest first. Other harnesses group by the id's
+    /// provider prefix in catalog order. The default entry's heading is
+    /// empty. Pins are left out while filtering so a search lists each match
+    /// once.
+    pub fn grouped_model_choices(&self) -> Vec<(String, Option<&str>)> {
+        let needle = self.model_filter.trim().to_lowercase();
         let mut choices = Vec::new();
         if self.models_error.is_none() && (needle.is_empty() || "default".contains(&needle)) {
-            choices.push(("", None));
+            choices.push((String::new(), None));
         }
-        if needle.is_empty() && self.launch_provider == Provider::OpenCode {
-            let available = |model: &&String| self.available_models.contains(model);
-            let favorites = self.opencode_pins.favorite.iter().filter(available);
-            choices.extend(favorites.map(|model| ("Favorite", Some(model.as_str()))));
-            let recents = self
-                .opencode_pins
+        if self.launch_provider != Provider::OpenCode {
+            choices.extend(
+                self.available_models
+                    .iter()
+                    .filter(|model| model.to_lowercase().contains(&needle))
+                    .map(|model| {
+                        let provider = model.split('/').next().unwrap_or("");
+                        (provider.to_owned(), Some(model.as_str()))
+                    }),
+            );
+            return choices;
+        }
+        let pins = &self.opencode_pins;
+        let available = |model: &&String| self.available_models.contains(model);
+        let mut pinned: Vec<&str> = Vec::new();
+        if needle.is_empty() {
+            for model in pins.favorite.iter().filter(available) {
+                choices.push(("Favorites".to_owned(), Some(model.as_str())));
+                pinned.push(model);
+            }
+            let mut recents = pins
                 .recent
                 .iter()
                 .filter(available)
-                .filter(|model| !self.opencode_pins.favorite.contains(model));
-            choices.extend(recents.map(|model| ("Recent", Some(model.as_str()))));
+                .filter(|model| !pins.favorite.contains(model))
+                .map(|model| (self.model_display(model), model.as_str()))
+                .collect::<Vec<_>>();
+            recents.sort_by(
+                |((title, provider), _), ((other_title, other_provider), _)| {
+                    provider.cmp(other_provider).then(title.cmp(other_title))
+                },
+            );
+            for ((_, provider), model) in recents {
+                choices.push((format!("Recent · {provider}"), Some(model)));
+                pinned.push(model);
+            }
         }
+        let mut rest = self
+            .available_models
+            .iter()
+            .map(String::as_str)
+            .filter(|model| !pinned.contains(model))
+            .filter(|model| {
+                let (title, provider) = self.model_display(model);
+                needle.is_empty()
+                    || model.to_lowercase().contains(&needle)
+                    || title.to_lowercase().contains(&needle)
+                    || provider.to_lowercase().contains(&needle)
+            })
+            .collect::<Vec<_>>();
+        // OpenCode's order: its own provider first, then providers by name,
+        // then newest release, then name.
+        rest.sort_by(|left, right| {
+            let (left_title, left_provider) = self.model_display(left);
+            let (right_title, right_provider) = self.model_display(right);
+            let left_id = left.split('/').next().unwrap_or("");
+            let right_id = right.split('/').next().unwrap_or("");
+            (left_id != "opencode")
+                .cmp(&(right_id != "opencode"))
+                .then(left_provider.cmp(right_provider))
+                .then(left_id.cmp(right_id))
+                .then(self.model_release(right).cmp(self.model_release(left)))
+                .then(left_title.cmp(right_title))
+        });
         choices.extend(
-            self.available_models
-                .iter()
-                .filter(|model| model.to_ascii_lowercase().contains(&needle))
-                .map(|model| {
-                    let provider = model.split('/').next().unwrap_or("");
-                    (provider, Some(model.as_str()))
-                }),
+            rest.into_iter()
+                .map(|model| (self.model_display(model).1.to_owned(), Some(model))),
         );
         choices
     }
@@ -6571,12 +6670,10 @@ mod tests {
         assert_eq!(
             app.grouped_model_choices(),
             vec![
-                ("", None),
-                ("Favorite", Some("cursor/auto")),
-                ("Recent", Some("openai/gpt-6")),
-                ("anthropic", Some("anthropic/claude-opus-5-5")),
-                ("cursor", Some("cursor/auto")),
-                ("openai", Some("openai/gpt-6")),
+                (String::new(), None),
+                ("Favorites".into(), Some("cursor/auto")),
+                ("Recent · openai".into(), Some("openai/gpt-6")),
+                ("anthropic".into(), Some("anthropic/claude-opus-5-5")),
             ]
         );
         assert_eq!(app.model_selection, 2);
@@ -6586,7 +6683,101 @@ mod tests {
         app.push_input('t');
         assert_eq!(
             app.grouped_model_choices(),
-            vec![("openai", Some("openai/gpt-6"))]
+            vec![("openai".into(), Some("openai/gpt-6"))]
+        );
+    }
+
+    #[test]
+    fn opencode_picker_groups_recents_by_provider_and_orders_like_opencode() {
+        use crate::model_catalog::{ModelLabel, ModelLabels};
+        let mut app = opencode_app();
+        let label = |name: &str, provider: &str, release: &str| ModelLabel {
+            name: name.into(),
+            provider: provider.into(),
+            release: release.into(),
+        };
+        app.set_model_labels(
+            Provider::OpenCode,
+            ModelLabels::from([
+                (
+                    "openai/gpt-6.1-sol".into(),
+                    label("GPT-6.1 Sol", "OpenAI", "2026-09-29"),
+                ),
+                (
+                    "openai/gpt-6-astra".into(),
+                    label("GPT-6 Astra", "OpenAI", "2026-09-04"),
+                ),
+                (
+                    "cursor/claude-opus-5-5".into(),
+                    label("Claude Opus 5.5", "Cursor", ""),
+                ),
+                (
+                    "anthropic/claude-opus-5-5".into(),
+                    label("Claude Opus 5.5", "Anthropic", "2026-09-22"),
+                ),
+                (
+                    "anthropic/claude-haiku-5-5".into(),
+                    label("Claude Haiku 5.5", "Anthropic", "2026-06-01"),
+                ),
+                (
+                    "anthropic/claude-fable-5-1".into(),
+                    label("Claude Fable 5.1", "Anthropic", "2026-09-01"),
+                ),
+            ]),
+        );
+        // Most recent first, interleaving vendors, as OpenCode stores them.
+        app.set_opencode_pins(crate::model_catalog::OpenCodePins {
+            recent: vec![
+                "openai/gpt-6.1-sol".into(),
+                "cursor/claude-opus-5-5".into(),
+                "anthropic/claude-opus-5-5".into(),
+                "openai/gpt-6-astra".into(),
+            ],
+            favorite: Vec::new(),
+        });
+        app.launch_model = Some("anthropic/claude-opus-5-5".into());
+        app.open_model_picker();
+        app.set_available_models(
+            Provider::OpenCode,
+            Ok(vec![
+                "anthropic/claude-fable-5-1".into(),
+                "anthropic/claude-haiku-5-5".into(),
+                "anthropic/claude-opus-5-5".into(),
+                "cursor/claude-opus-5-5".into(),
+                "openai/gpt-6-astra".into(),
+                "openai/gpt-6.1-sol".into(),
+            ]),
+        );
+        assert_eq!(
+            app.grouped_model_choices(),
+            vec![
+                (String::new(), None),
+                (
+                    "Recent · Anthropic".into(),
+                    Some("anthropic/claude-opus-5-5")
+                ),
+                ("Recent · Cursor".into(), Some("cursor/claude-opus-5-5")),
+                ("Recent · OpenAI".into(), Some("openai/gpt-6-astra")),
+                ("Recent · OpenAI".into(), Some("openai/gpt-6.1-sol")),
+                ("Anthropic".into(), Some("anthropic/claude-fable-5-1")),
+                ("Anthropic".into(), Some("anthropic/claude-haiku-5-5")),
+            ]
+        );
+        assert_eq!(app.model_selection, 1);
+        assert_eq!(
+            app.model_display("cursor/claude-opus-5-5"),
+            ("Claude Opus 5.5", "Cursor")
+        );
+
+        for character in "opus 5.5".chars() {
+            app.push_input(character);
+        }
+        assert_eq!(
+            app.grouped_model_choices(),
+            vec![
+                ("Anthropic".into(), Some("anthropic/claude-opus-5-5")),
+                ("Cursor".into(), Some("cursor/claude-opus-5-5")),
+            ]
         );
     }
 
