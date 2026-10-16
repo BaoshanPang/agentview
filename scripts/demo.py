@@ -6,12 +6,17 @@ Run from the repo root after `cargo build --release`:
     uv run --with pillow scripts/demo.py
 
 Needs vhs and ffmpeg. The script writes a VHS tape, records it at twice the
-README display size, draws a badge for every shortcut pressed, and encodes the
-GIF. Badge timing is derived from the same step list that produces the tape,
+README display size in light mode (Catppuccin Latte with a white background),
+draws a badge for every shortcut pressed, and encodes the GIF. It also
+generates 500 past sessions with message text for the Ctrl+G search, links
+two OpenCode sub-sessions to the session that spawned them, and seeds
+OpenCode's recent models so the model picker shows its "Recent · Provider"
+groups. Badge timing is derived from the same step list that produces the tape,
 so edit `STEPS` rather than the generated tape.
 """
 
 import json
+import random
 import shutil
 import subprocess
 import sys
@@ -26,32 +31,79 @@ OUTPUT_GIF = REPO / "docs/assets/demo.gif"
 OUTPUT_MP4 = REPO / "target/demo/demo.mp4"
 
 SCALE = 2
-WIDTH, HEIGHT, PADDING, FONT_SIZE = 1300 * SCALE, 560 * SCALE, 20 * SCALE, 16 * SCALE
+WIDTH, HEIGHT, PADDING, FONT_SIZE = 1300 * SCALE, 760 * SCALE, 20 * SCALE, 16 * SCALE
 FRAMERATE = 20
 GIF_WIDTH, GIF_FPS = 1600, 20
 TYPING_MS = 60
 
-# Sessions the demo user finished earlier and that no longer clutter the list.
-PAST_SESSIONS = [
-    ("claude:host:stripe-webhooks", "claude", "stripe-webhooks", 3 * 86400),
-    ("codex:host:cart-a11y", "codex", "cart-accessibility", 5 * 86400),
-    ("opencode:host:legacy-checkout", "opencode", "remove-legacy-checkout", 9 * 86400),
+FIXTURE = REPO / "fixtures/demo-sessions.json"
+PAST_SESSION_COUNT = 500
+
+# The one past session the demo searches for, by a phrase from its messages.
+TARGET_PAST_SESSION = {
+    "id": "claude:host:webhook-retries",
+    "provider_session_id": "44444444-4444-4444-8444-444444444444",
+    "provider": "claude",
+    "name": "webhook-retries",
+    "cwd": "/work/shop-api",
+    "age_secs": 23 * 86400,
+    "transcript": "Stripe retries a webhook for up to three days, so the handler stores "
+    "each event id and skips duplicates. I added an idempotency key table and "
+    "a test that replays the same charge.succeeded event twice.",
+}
+
+# OpenCode sessions started by another OpenCode session: child -> parent, by
+# the id after `opencode:host:` in the fixture.
+SESSION_PARENTS = {
+    "ses_demo_flaky_payments": "flaky-tests",
+    "ses_demo_flaky_clock": "flaky-tests",
+}
+
+# OpenCode's own recent models, most recent first, as its model.json keeps them.
+RECENT_MODELS = [
+    "openai/gpt-6.1-sol",
+    "cursor/claude-sonnet-5-5",
+    "anthropic/claude-opus-5-5",
+    "openai/gpt-6-luna",
+    "anthropic/claude-sonnet-5-5",
+    "cursor/claude-opus-5-5-1m",
+    "openai/gpt-6-astra",
 ]
+
+# Catppuccin Latte with a white background and black text.
+THEME = {
+    "name": "Catppuccin Latte White",
+    "black": "#5c5f77", "red": "#d20f39", "green": "#40a02b", "yellow": "#df8e1d",
+    "blue": "#1e66f5", "magenta": "#ea76cb", "cyan": "#179299", "white": "#acb0be",
+    "brightBlack": "#6c6f85", "brightRed": "#de293e", "brightGreen": "#49af3d",
+    "brightYellow": "#eea02d", "brightBlue": "#456eff", "brightMagenta": "#fe85d8",
+    "brightCyan": "#2d9fa8", "brightWhite": "#bcc0cc",
+    "background": "#ffffff", "foreground": "#000000",
+    "cursor": "#dc8a78", "selection": "#acb0be",
+}
 
 # (VHS command, badge keys, badge caption, seconds to wait afterwards).
 # `keys` is None for steps that get no badge.
 STEPS = [
-    ("Sleep", None, None, 1.5),
-    ("Down", ["↓"], "select", 0.7),
-    ("Down", ["↓"], "select", 0.7),
-    ("Space", ["space"], "peek", 3.0),
-    ("Space", ["space"], "close peek", 1.0),
-    ("Ctrl+G", ["ctrl", "G"], "past sessions", 1.6),
-    ('Type "stripe"', None, None, 1.0),
-    ("Enter", ["enter"], "restore to the list", 2.2),
+    ("Sleep", None, None, 2.5),
+    ("Down", None, None, 0.25),
+    ("Down", None, None, 0.25),
+    ("Down", None, None, 0.25),
+    ("Down", None, None, 0.25),
+    ("Down", None, None, 0.25),
+    ("Down", ["↓"], "select", 0.6),
+    ("Down", ["↓"], "sub-session", 0.9),
     ("Space", ["space"], "peek", 2.6),
-    ("Space", ["space"], "close peek", 1.0),
-    ('Type "add rate limiting to the checkout API"', None, None, 3.0),
+    ("Space", ["space"], "close peek", 0.8),
+    ("Ctrl+G", ["ctrl", "G"], f"search {PAST_SESSION_COUNT} past sessions", 1.6),
+    ('Type "idempotency"', None, None, 2.6),
+    ("Escape", ["esc"], "close", 0.8),
+    ('Type "add rate limiting to the checkout API"', None, None, 1.0),
+    ("Shift+Tab", ["shift", "tab"], "choose model", 3.2),
+    ("Down", ["↓"], "select", 0.5),
+    ("Down", ["↓"], "select", 0.5),
+    ("Down", ["↓"], "select", 0.9),
+    ("Enter", ["enter"], "use this model", 2.5),
 ]
 BADGE_SECONDS = 1.4
 
@@ -64,7 +116,7 @@ def step_duration(command: str) -> float:
     return TYPING_MS / 1000
 
 
-def tape(state_dir: Path, mp4: Path) -> str:
+def tape(state_dir: Path, fixture: Path, mp4: Path) -> str:
     lines = [
         f'Output "{mp4}"',
         'Set Shell "bash"',
@@ -73,13 +125,15 @@ def tape(state_dir: Path, mp4: Path) -> str:
         f"Set Height {HEIGHT}",
         f"Set Padding {PADDING}",
         f"Set Framerate {FRAMERATE}",
-        'Set Theme "Catppuccin Mocha"',
+        f"Set Theme {json.dumps(THEME)}",
+        'Set FontFamily "Menlo"',
+        "Set LineHeight 1.3",
         f"Set TypingSpeed {TYPING_MS}ms",
         "",
         "Hide",
         f"Type \"export REPO={REPO} HOME={state_dir}/home XDG_STATE_HOME={state_dir}/state PS1='$ '; "
         f'mkdir -p $HOME/Code/shop; cd $HOME/Code/shop; clear" Enter',
-        'Type "$REPO/target/release/agentview --fixture $REPO/fixtures/demo-sessions.json" Enter',
+        f'Type "$REPO/target/release/agentview --theme light --harness opencode --fixture {fixture}" Enter',
         "Sleep 2s",
         "Show",
     ]
@@ -131,9 +185,9 @@ def draw_badge(keys: list[str], caption: str, path: Path) -> None:
     draw = ImageDraw.Draw(image)
     draw.rounded_rectangle(
         (0, 0, width - 1, height - 1),
-        radius=10 * SCALE,
-        fill=(17, 17, 27, 235),
-        outline=(124, 92, 255, 255),
+        radius=17 * SCALE,  # key radius (5) + padding (12), so the corners are concentric
+        fill=(255, 255, 255, 245),
+        outline=(30, 102, 245, 255),
         width=2 * SCALE,
     )
     x = pad
@@ -141,15 +195,15 @@ def draw_badge(keys: list[str], caption: str, path: Path) -> None:
         draw.rounded_rectangle(
             (x, pad, x + key_width, pad + key_height),
             radius=5 * SCALE,
-            fill=(49, 50, 68, 255),
-            outline=(88, 91, 112, 255),
+            fill=(239, 241, 245, 255),
+            outline=(172, 176, 190, 255),
             width=SCALE,
         )
         draw.text(
             (x + key_width / 2, pad + key_height / 2),
             key,
             font=key_font,
-            fill=(205, 214, 244, 255),
+            fill=(0, 0, 0, 255),
             anchor="mm",
         )
         x += key_width + gap
@@ -157,27 +211,72 @@ def draw_badge(keys: list[str], caption: str, path: Path) -> None:
         (x + gap, pad + key_height / 2),
         caption,
         font=caption_font,
-        fill=(166, 173, 200, 255),
+        fill=(76, 79, 105, 255),
         anchor="lm",
     )
     image.save(path)
 
 
-def seed_past_sessions(state_dir: Path) -> None:
-    registry = state_dir / "state/agentview"
-    registry.mkdir(parents=True, mode=0o700)
-    registry.chmod(0o700)
+def past_sessions() -> list[dict]:
+    """Plausible finished sessions across a few repos, with message text."""
+    rng = random.Random(7)
+    repos = ["shop-api", "shop-web", "infra", "mobile-app", "analytics"]
+    areas = ["checkout", "cart", "search", "auth", "orders", "invoices", "emails",
+             "inventory", "reviews", "shipping", "coupons", "admin", "onboarding"]
+    tasks = ["fix", "refactor", "add-tests", "speed-up", "migrate", "clean-up", "debug"]
+    providers = ["claude", "codex", "opencode", "cursor"]
+    sentences = [
+        "The {area} tests pass locally and in CI now.",
+        "I moved the {area} queries behind a repository interface.",
+        "Profiling showed the {area} page spent most time in JSON parsing.",
+        "Renamed the {area} feature flag and removed the dead branch.",
+        "The flaky {area} test depended on wall-clock time; it now uses a fake clock.",
+        "Added pagination to the {area} endpoint and updated the client.",
+        "Logged the {area} error with the request id so support can find it.",
+    ]
+    sessions = []
+    for index in range(PAST_SESSION_COUNT - 1):
+        area = rng.choice(areas)
+        provider = rng.choice(providers)
+        sessions.append({
+            "id": f"{provider}:host:past-{index}",
+            "provider_session_id": f"past-{index}",
+            "provider": provider,
+            "name": f"{rng.choice(tasks)}-{area}-{index}",
+            "cwd": f"/work/{rng.choice(repos)}",
+            "age_secs": rng.randint(2 * 86400, 120 * 86400),
+            "transcript": " ".join(
+                rng.choice(sentences).format(area=area) for _ in range(rng.randint(3, 8))
+            ),
+        })
+    sessions.append(TARGET_PAST_SESSION)
+    return sessions
+
+
+def write_fixture(path: Path) -> None:
+    document = json.loads(FIXTURE.read_text())
+    # Open sessions were active in the last hour, newest first in file order.
     now_ms = int(time.time() * 1000)
-    document = {
-        "version": 1,
-        "sessions": [
-            {"id": id, "provider": provider, "name": name, "hidden_at_ms": now_ms - age * 1000}
-            for id, provider, name, age in PAST_SESSIONS
-        ],
-    }
-    path = registry / "hidden-sessions.json"
-    path.write_text(json.dumps(document, indent=2) + "\n")
-    path.chmod(0o600)
+    for index, session in enumerate(document["sessions"]):
+        session["updated_at"] = now_ms - (2 + index * 4) * 60_000
+    document["demo"]["restorable"] = past_sessions()
+    path.write_text(json.dumps(document))
+
+
+def seed_state(state_dir: Path) -> None:
+    state = state_dir / "state"
+    registry = state / "agentview"
+    (registry / "opencode").mkdir(parents=True, mode=0o700)
+    registry.chmod(0o700)
+    parents = registry / "opencode/session-parents.jsonl"
+    parents.write_text(
+        "".join(json.dumps({"child": child, "parent": parent}) + "\n"
+                for child, parent in SESSION_PARENTS.items())
+    )
+    opencode = state / "opencode"
+    opencode.mkdir(parents=True, mode=0o700)
+    recent = [dict(zip(("providerID", "modelID"), model.split("/", 1))) for model in RECENT_MODELS]
+    (opencode / "model.json").write_text(json.dumps({"recent": recent, "favorite": []}))
 
 
 def run(*command: str | Path) -> None:
@@ -195,10 +294,12 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="agentview-demo-") as temp:
         temp = Path(temp).resolve()
         state_dir = temp / "env"
-        seed_past_sessions(state_dir)
+        seed_state(state_dir)
+        fixture = temp / "fixture.json"
+        write_fixture(fixture)
         raw = temp / "raw.mp4"
         tape_path = temp / "demo.tape"
-        tape_path.write_text(tape(state_dir, raw))
+        tape_path.write_text(tape(state_dir, fixture, raw))
         run("vhs", tape_path)
 
         events = badge_events()
@@ -210,7 +311,7 @@ def main() -> None:
             draw_badge(keys, caption, badge)
             inputs += ["-i", badge]
             filters.append(
-                f"[{label}][{index}:v]overlay=x=W-w-{28 * SCALE}:y={22 * SCALE}"
+                f"[{label}][{index}:v]overlay=x=W-w-{28 * SCALE}:y=H-h-{6 * SCALE}"
                 f":enable='between(t,{start:.3f},{end:.3f})'[v{index}]"
             )
             label = f"v{index}"

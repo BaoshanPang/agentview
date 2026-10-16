@@ -158,8 +158,15 @@ uv run --with pillow scripts/demo.py
 ```
 
 This rewrites `docs/assets/demo.gif` with a badge for each shortcut pressed,
-and leaves a 2600×1120 MP4 at `target/demo/demo.mp4`. Edit the step list in
+and leaves a 2600×1520 MP4 at `target/demo/demo.mp4`. Edit the step list in
 `scripts/demo.py` to change what the demo shows.
+
+The fixture's `demo` section stands in for what a live dashboard would ask a
+harness for: the harnesses and models the composer offers, the usage header,
+and the past sessions Ctrl+G searches. The script adds 500 generated past
+sessions, links the OpenCode sub-sessions to their parent, and seeds
+OpenCode's recent models in a throwaway state directory, so nothing from the
+recording machine shows up.
 
 ## Verify a published release
 

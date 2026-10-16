@@ -321,7 +321,16 @@ pub fn run_dashboard(
     app.color_scheme = color_scheme;
     crate::theme::set_terminal_scheme(color_scheme);
     let scheme_watcher = SchemeWatcher::spawn(theme_preference);
-    let usage_watcher = crate::usage::UsageWatcher::spawn();
+    // A fixture never reaches a provider, so its usage is the fixture's.
+    let fixture_usage = control.fixture_usage();
+    let usage_watcher = if fixture_usage.is_some() || !control.provider_io_enabled() {
+        None
+    } else {
+        crate::usage::UsageWatcher::spawn()
+    };
+    if let Some(usage) = fixture_usage {
+        app.usage = usage;
+    }
     let mut usage_minute = 0;
     let mut terminal = TerminalSession::enter()?;
     let initial_size = terminal.terminal.size()?;

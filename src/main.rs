@@ -628,6 +628,11 @@ fn main() -> Result<()> {
         yolo: cli.yolo,
     })?;
     control.register_migration_registry(migration_registry.clone());
+    if let Some(fixture) = &cli.fixture {
+        if let Some(demo) = agentview::adapters::FixtureDemo::load(fixture)? {
+            control.set_fixture_demo(demo);
+        }
+    }
     #[cfg(target_os = "linux")]
     let pi_supervisor = pi_session_dir
         .as_ref()

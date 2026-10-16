@@ -4,7 +4,9 @@
       "id": "codex:host:migrate-approval",
       "provider_session_id": "thread-demo-migrate",
       "provider": "codex",
-      "runtime": { "kind": "host" },
+      "runtime": {
+        "kind": "host"
+      },
       "kind": "managed",
       "name": "db-migration",
       "cwd": "/work/shop-api",
@@ -15,13 +17,19 @@
       "started_at": null,
       "updated_at": null,
       "pull_requests": null,
-      "capabilities": ["inspect", "approve", "decline"]
+      "capabilities": [
+        "inspect",
+        "approve",
+        "decline"
+      ]
     },
     {
       "id": "claude:host:checkout-question",
       "provider_session_id": "33333333-3333-4333-8333-333333333333",
       "provider": "claude",
-      "runtime": { "kind": "host" },
+      "runtime": {
+        "kind": "host"
+      },
       "kind": "background",
       "name": "checkout-redesign",
       "cwd": "/work/shop-web",
@@ -32,13 +40,18 @@
       "started_at": null,
       "updated_at": null,
       "pull_requests": null,
-      "capabilities": ["inspect", "respond"]
+      "capabilities": [
+        "inspect",
+        "respond"
+      ]
     },
     {
       "id": "opencode:host:flaky-tests",
       "provider_session_id": "ses_demo_flaky",
       "provider": "opencode",
-      "runtime": { "kind": "host" },
+      "runtime": {
+        "kind": "host"
+      },
       "kind": "managed",
       "name": "fix-flaky-tests",
       "cwd": "/work/shop-api",
@@ -49,13 +62,59 @@
       "started_at": null,
       "updated_at": null,
       "pull_requests": null,
-      "capabilities": ["inspect"]
+      "capabilities": [
+        "inspect"
+      ]
+    },
+    {
+      "id": "opencode:host:ses_demo_flaky_payments",
+      "provider_session_id": "ses_demo_flaky_payments",
+      "provider": "opencode",
+      "runtime": {
+        "kind": "host"
+      },
+      "kind": "managed",
+      "name": "rerun-payments-suite",
+      "cwd": "/work/shop-api",
+      "state": "working",
+      "summary": "Run 14 of 20: 2 failures, both in capture_after_refund",
+      "raw_state": "busy",
+      "pid": null,
+      "started_at": null,
+      "updated_at": null,
+      "pull_requests": null,
+      "capabilities": [
+        "inspect"
+      ]
+    },
+    {
+      "id": "opencode:host:ses_demo_flaky_clock",
+      "provider_session_id": "ses_demo_flaky_clock",
+      "provider": "opencode",
+      "runtime": {
+        "kind": "host"
+      },
+      "kind": "managed",
+      "name": "fake-the-clock",
+      "cwd": "/work/shop-api",
+      "state": "working",
+      "summary": "Replacing Date.now() in the retry helper with an injected clock",
+      "raw_state": "busy",
+      "pid": null,
+      "started_at": null,
+      "updated_at": null,
+      "pull_requests": null,
+      "capabilities": [
+        "inspect"
+      ]
     },
     {
       "id": "cursor:host:search",
       "provider_session_id": "cursor-demo-search",
       "provider": "cursor",
-      "runtime": { "kind": "host" },
+      "runtime": {
+        "kind": "host"
+      },
       "kind": "managed",
       "name": "search-autocomplete",
       "cwd": "/work/shop-web",
@@ -66,13 +125,17 @@
       "started_at": null,
       "updated_at": null,
       "pull_requests": null,
-      "capabilities": ["inspect"]
+      "capabilities": [
+        "inspect"
+      ]
     },
     {
       "id": "claude:host:docs",
       "provider_session_id": "44444444-4444-4444-8444-444444444444",
       "provider": "claude",
-      "runtime": { "kind": "host" },
+      "runtime": {
+        "kind": "host"
+      },
       "kind": "background",
       "name": "api-docs",
       "cwd": "/work/shop-api",
@@ -83,13 +146,17 @@
       "started_at": null,
       "updated_at": null,
       "pull_requests": null,
-      "capabilities": ["inspect"]
+      "capabilities": [
+        "inspect"
+      ]
     },
     {
       "id": "pi:host:perf",
       "provider_session_id": "pi-demo-perf",
       "provider": "pi",
-      "runtime": { "kind": "host" },
+      "runtime": {
+        "kind": "host"
+      },
       "kind": "managed",
       "name": "image-perf",
       "cwd": "/work/shop-web",
@@ -100,13 +167,17 @@
       "started_at": null,
       "updated_at": null,
       "pull_requests": 1,
-      "capabilities": ["inspect"]
+      "capabilities": [
+        "inspect"
+      ]
     },
     {
       "id": "codex:host:refunds",
       "provider_session_id": "thread-demo-refunds",
       "provider": "codex",
-      "runtime": { "kind": "host" },
+      "runtime": {
+        "kind": "host"
+      },
       "kind": "managed",
       "name": "partial-refunds",
       "cwd": "/work/shop-api",
@@ -117,13 +188,17 @@
       "started_at": null,
       "updated_at": null,
       "pull_requests": 1,
-      "capabilities": ["inspect"]
+      "capabilities": [
+        "inspect"
+      ]
     },
     {
       "id": "opencode:host:deps",
       "provider_session_id": "ses_demo_deps",
       "provider": "opencode",
-      "runtime": { "kind": "host" },
+      "runtime": {
+        "kind": "host"
+      },
       "kind": "managed",
       "name": "bump-deps",
       "cwd": "/work/shop-web",
@@ -134,13 +209,17 @@
       "started_at": null,
       "updated_at": null,
       "pull_requests": null,
-      "capabilities": ["inspect"]
+      "capabilities": [
+        "inspect"
+      ]
     },
     {
       "id": "claude:host:stripe-webhooks",
       "provider_session_id": "55555555-5555-4555-8555-555555555555",
       "provider": "claude",
-      "runtime": { "kind": "host" },
+      "runtime": {
+        "kind": "host"
+      },
       "kind": "background",
       "name": "stripe-webhooks",
       "cwd": "/work/shop-api",
@@ -151,13 +230,17 @@
       "started_at": null,
       "updated_at": null,
       "pull_requests": 1,
-      "capabilities": ["inspect"]
+      "capabilities": [
+        "inspect"
+      ]
     },
     {
       "id": "codex:host:cart-a11y",
       "provider_session_id": "thread-demo-cart-a11y",
       "provider": "codex",
-      "runtime": { "kind": "host" },
+      "runtime": {
+        "kind": "host"
+      },
       "kind": "managed",
       "name": "cart-accessibility",
       "cwd": "/work/shop-web",
@@ -168,13 +251,17 @@
       "started_at": null,
       "updated_at": null,
       "pull_requests": null,
-      "capabilities": ["inspect"]
+      "capabilities": [
+        "inspect"
+      ]
     },
     {
       "id": "opencode:host:legacy-checkout",
       "provider_session_id": "ses_demo_legacy",
       "provider": "opencode",
-      "runtime": { "kind": "host" },
+      "runtime": {
+        "kind": "host"
+      },
       "kind": "managed",
       "name": "remove-legacy-checkout",
       "cwd": "/work/shop-web",
@@ -185,8 +272,131 @@
       "started_at": null,
       "updated_at": null,
       "pull_requests": null,
-      "capabilities": ["inspect"]
+      "capabilities": [
+        "inspect"
+      ]
     }
   ],
-  "warnings": []
+  "warnings": [],
+  "demo": {
+    "launch": [
+      {
+        "provider": "opencode",
+        "models": [
+          "anthropic/claude-fable-5-1",
+          "anthropic/claude-haiku-5-5",
+          "anthropic/claude-opus-5-5",
+          "anthropic/claude-sonnet-5-5",
+          "cursor/auto",
+          "cursor/claude-opus-5-5-1m",
+          "cursor/claude-sonnet-5-5",
+          "cursor/composer-2.5",
+          "groq/llama-3.3-70b-versatile",
+          "openai/gpt-6-astra",
+          "openai/gpt-6-luna",
+          "openai/gpt-6.1-sol"
+        ],
+        "labels": {
+          "anthropic/claude-opus-5-5": {
+            "name": "Claude Opus 5.5",
+            "provider": "Anthropic",
+            "release": "2026-09-22"
+          },
+          "anthropic/claude-sonnet-5-5": {
+            "name": "Claude Sonnet 5.5",
+            "provider": "Anthropic",
+            "release": "2026-08-12"
+          },
+          "anthropic/claude-haiku-5-5": {
+            "name": "Claude Haiku 5.5",
+            "provider": "Anthropic",
+            "release": "2026-06-30"
+          },
+          "anthropic/claude-fable-5-1": {
+            "name": "Claude Fable 5.1",
+            "provider": "Anthropic",
+            "release": "2026-09-01"
+          },
+          "cursor/auto": {
+            "name": "Auto",
+            "provider": "Cursor",
+            "release": ""
+          },
+          "cursor/claude-opus-5-5-1m": {
+            "name": "Claude Opus 5.5 1M",
+            "provider": "Cursor",
+            "release": ""
+          },
+          "cursor/claude-sonnet-5-5": {
+            "name": "Claude Sonnet 5.5",
+            "provider": "Cursor",
+            "release": ""
+          },
+          "cursor/composer-2.5": {
+            "name": "Composer 2.5",
+            "provider": "Cursor",
+            "release": ""
+          },
+          "openai/gpt-6.1-sol": {
+            "name": "GPT-6.1 Sol",
+            "provider": "OpenAI",
+            "release": "2026-09-29"
+          },
+          "openai/gpt-6-astra": {
+            "name": "GPT-6 Astra",
+            "provider": "OpenAI",
+            "release": "2026-09-04"
+          },
+          "openai/gpt-6-luna": {
+            "name": "GPT-6 Luna",
+            "provider": "OpenAI",
+            "release": "2026-09-04"
+          },
+          "groq/llama-3.3-70b-versatile": {
+            "name": "Llama 3.3 70B",
+            "provider": "Groq",
+            "release": "2024-12-06"
+          }
+        }
+      },
+      {
+        "provider": "claude"
+      },
+      {
+        "provider": "codex"
+      }
+    ],
+    "usage": [
+      {
+        "provider": "claude",
+        "windows": [
+          {
+            "label": "5h",
+            "percent": 38,
+            "resets_in_secs": 8100
+          },
+          {
+            "label": "week",
+            "percent": 21,
+            "resets_in_secs": 345600
+          }
+        ]
+      },
+      {
+        "provider": "codex",
+        "windows": [
+          {
+            "label": "5h",
+            "percent": 12,
+            "resets_in_secs": 13500
+          },
+          {
+            "label": "week",
+            "percent": 44,
+            "resets_in_secs": 190800
+          }
+        ]
+      }
+    ]
+  }
 }

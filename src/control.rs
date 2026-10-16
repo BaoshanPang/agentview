@@ -300,6 +300,8 @@ pub struct ControlHub {
     provider_io_enabled: bool,
     yolo: bool,
     migration_registry: Option<MigrationRegistry>,
+    /// A fixture's stand-in harnesses, models and past sessions.
+    fixture_demo: Option<Arc<crate::adapters::FixtureDemo>>,
 }
 
 impl ControlHub {
@@ -353,6 +355,7 @@ impl ControlHub {
             provider_io_enabled: config.provider_io_enabled,
             yolo: config.yolo,
             migration_registry: None,
+            fixture_demo: None,
         })
     }
 
@@ -432,7 +435,19 @@ impl ControlHub {
             .collect()
     }
 
+    /// Serve the composer, model picker and restore picker from a fixture.
+    pub fn set_fixture_demo(&mut self, demo: crate::adapters::FixtureDemo) {
+        self.fixture_demo = Some(Arc::new(demo));
+    }
+
+    pub fn fixture_usage(&self) -> Option<Vec<crate::usage::Usage>> {
+        self.fixture_demo.as_ref().map(|demo| demo.usage())
+    }
+
     pub fn launch_targets(&self) -> Vec<LaunchTarget> {
+        if let Some(demo) = &self.fixture_demo {
+            return demo.launch_targets();
+        }
         self.controllers
             .values()
             .filter_map(|controller| match controller.launch_mode() {
@@ -462,6 +477,13 @@ impl ControlHub {
         &self,
         provider: &Provider,
     ) -> Result<(Vec<String>, crate::model_catalog::ModelLabels)> {
+        if let Some(models) = self
+            .fixture_demo
+            .as_ref()
+            .and_then(|demo| demo.models(provider))
+        {
+            return Ok(models);
+        }
         self.ensure_provider_io()?;
         let controller = self.controller(provider)?;
         if controller.launch_mode() != LaunchMode::SelectableModel {
@@ -734,6 +756,9 @@ impl ControlHub {
     pub fn restorable_sessions(&self) -> (Vec<RestorableSession>, Vec<String>) {
         let mut sessions = Vec::new();
         let mut errors = Vec::new();
+        if let Some(demo) = &self.fixture_demo {
+            return (demo.restorable_sessions(), errors);
+        }
         if self.ensure_provider_io().is_err() {
             return (sessions, errors);
         }
@@ -2223,6 +2248,7 @@ mod tests {
             provider_io_enabled: true,
             yolo: false,
             migration_registry: None,
+            fixture_demo: None,
         };
         let mut owned = session("owned123-full");
         let external = session("external-full");
@@ -2639,6 +2665,7 @@ exit 0
             provider_io_enabled: false,
             yolo: false,
             migration_registry: None,
+            fixture_demo: None,
         };
         let mut item = session("fixture-session");
         item.provider = Provider::Codex;
@@ -2695,6 +2722,7 @@ exit 0
             provider_io_enabled: true,
             yolo: false,
             migration_registry: None,
+            fixture_demo: None,
         }
     }
 

@@ -10,7 +10,7 @@ harnesses and plain shell jobs.
 [![Release](https://img.shields.io/badge/release-v0.1.0-7c5cff.svg)](https://github.com/moritzWa/agentview/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-7c5cff.svg)](LICENSE)
 
-<img src="docs/assets/demo.gif" alt="agentview demo: inspecting a session, bringing a past session back with Ctrl+G, and starting a new task" width="800">
+<img src="docs/assets/demo.gif" alt="agentview demo in light mode: usage limits in the header, OpenCode sub-sessions indented under the session that started them, searching 500 past sessions by message text with Ctrl+G, and picking a model grouped by provider" width="800">
 
 </div>
 
