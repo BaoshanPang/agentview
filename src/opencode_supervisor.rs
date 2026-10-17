@@ -3075,7 +3075,14 @@ fn process_cmdline(_: u32) -> Result<Vec<u8>> {
 fn verify_listener_owner(pid: u32, port: u16) -> Result<()> {
     let mut socket_inodes = BTreeSet::new();
     for entry in fs::read_dir(format!("/proc/{pid}/fd"))? {
-        let target = fs::read_link(entry?.path())?;
+        // Tools and HTTP requests close unrelated descriptors while procfs is
+        // being enumerated. A vanished fd is not a vanished server; we still
+        // require a surviving socket inode to match the exact listen address.
+        let target = match fs::read_link(entry?.path()) {
+            Ok(target) => target,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         let target = target.to_string_lossy();
         if let Some(inode) = target
             .strip_prefix("socket:[")
@@ -3302,6 +3309,31 @@ pub(crate) fn start_test_server(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn listener_ownership_survives_unrelated_descriptors_closing() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let signal = stop.clone();
+        let churn = std::thread::spawn(move || {
+            while !signal.load(Ordering::Relaxed) {
+                drop(std::fs::File::open("/dev/null").unwrap());
+                std::thread::yield_now();
+            }
+        });
+        let result =
+            (0..20).try_for_each(|_| super::verify_listener_owner(std::process::id(), port));
+        stop.store(true, Ordering::Relaxed);
+        churn.join().unwrap();
+        result.unwrap();
+        assert!(
+            super::verify_listener_owner(std::process::id(), 0).is_err(),
+            "ignoring closed descriptors must not grant authority over an unowned listener"
+        );
+    }
     #[test]
     fn v2_crash_recovery_uses_sequence_and_never_resumes_idle_or_child_turns() {
         let db = rusqlite::Connection::open_in_memory().unwrap();
