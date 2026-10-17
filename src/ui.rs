@@ -3468,7 +3468,8 @@ mod tests {
                 }
                 if width == 160 {
                     assert!(
-                        lines[row].contains("full") && lines[row].contains("by reset"),
+                        lines[row].contains("~109% by reset")
+                            && lines[row].contains("~9% by reset"),
                         "{text}"
                     );
                 }
