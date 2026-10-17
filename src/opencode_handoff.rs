@@ -504,10 +504,12 @@ fn new_input_id() -> Result<String> {
     let mut bytes = [0u8; 16];
     getrandom::getrandom(&mut bytes)
         .map_err(|e| anyhow::anyhow!("cannot allocate handoff input ID: {e}"))?;
-    Ok(format!(
-        "msg_{}",
-        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
-    ))
+    let mut id = String::with_capacity(36);
+    id.push_str("msg_");
+    for byte in bytes {
+        std::fmt::Write::write_fmt(&mut id, format_args!("{byte:02x}"))?;
+    }
+    Ok(id)
 }
 
 fn read_private<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>> {
@@ -563,7 +565,7 @@ mod tests {
     use super::*;
 
     fn entry() -> Entry {
-        serde_json::from_value(json!({"id":"ses_root","title":"Frozen task","directory":"/work","agent":"build","model":{"providerID":"p","id":"m"},"lastMessageID":"msg_assistant","createdAtMs":1,"updatedAtMs":2,"sourceState":"interrupted","resume":true,"toolsSettled":true,"externalActionsSettled":true})).unwrap()
+        serde_json::from_value(json!({"id":"ses_root","title":"Frozen task","directory":std::env::temp_dir().join("handoff-work"),"agent":"build","model":{"providerID":"p","id":"m"},"lastMessageID":"msg_assistant","createdAtMs":1,"updatedAtMs":2,"sourceState":"interrupted","resume":true,"toolsSettled":true,"externalActionsSettled":true})).unwrap()
     }
 
     fn interrupted() -> Value {

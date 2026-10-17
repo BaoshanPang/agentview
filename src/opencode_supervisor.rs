@@ -1822,17 +1822,20 @@ fn boot_time_ms() -> Option<u64> {
         tv_usec: 0,
     };
     let mut size = std::mem::size_of::<libc::timeval>();
-    let name = c"kern.boottime";
+    let name = b"kern.boottime\0";
     let result = unsafe {
         libc::sysctlbyname(
-            name.as_ptr(),
+            name.as_ptr().cast(),
             (&mut boot as *mut libc::timeval).cast(),
             &mut size,
             std::ptr::null_mut(),
             0,
         )
     };
-    (result == 0 && boot.tv_sec > 0).then(|| boot.tv_sec as u64 * 1000 + boot.tv_usec as u64 / 1000)
+    if result != 0 || boot.tv_sec <= 0 {
+        return None;
+    }
+    Some(boot.tv_sec as u64 * 1000 + boot.tv_usec as u64 / 1000)
 }
 
 #[cfg(target_os = "linux")]
