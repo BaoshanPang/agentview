@@ -229,6 +229,11 @@ Run builds and tests through the shared resource guard:
 ```sh
 python3 ~/.claude/scripts/heavy-job.py --wait -- cargo test --all-targets
 python3 ~/.claude/scripts/heavy-job.py --wait -- cargo build
+
+# Canonical CI quality and MSRV gates:
+python3 ~/.claude/scripts/heavy-job.py --wait -- cargo +1.75.0 fmt --all -- --check
+python3 ~/.claude/scripts/heavy-job.py --wait -- cargo +1.75.0 clippy --all-targets --locked -- -D warnings
+python3 ~/.claude/scripts/heavy-job.py --wait -- cargo +1.75.0 test --locked
 ```
 
 The opt-in real CLI contract uses the isolated environment above:
@@ -254,14 +259,22 @@ Recorded checks:
 - [x] Real stock V2 source lifecycle: create, prompt, reconnect, list,
   transcript, model/provider catalog, attach argv, reply, interrupt, restart,
   retained session, and verified shutdown. Passed in 5.09 seconds on macOS.
-- [x] Final library run: 711 passed, 2 ignored. The existing usage-header test
-  was excluded after its failure was reproduced on untouched `9e9390f`.
+- [x] Complete local macOS `cargo test --locked` runs on both Rust 1.75.0 and
+  stable passed without name filters or exclusions. Each run includes 712
+  library tests, 21 CLI tests, 5 README tests, and 24 real-PTY tests. Existing
+  opt-in provider/benchmark tests retain their original ignored status; no
+  additional tests were ignored or skipped to make these runs pass.
 - [x] CLI unit tests: 21 passed. The real handoff test also invokes both new
   CLI subcommands against the actual target server.
 - [x] Debug build.
-- [x] Full `--all-targets --no-fail-fast` run. README inventory and five PTY
-  tests failed; the same failures were reproduced on untouched `9e9390f`
-  (which had nine PTY failures). Existing tracking:
+- [x] Rust 1.75 formatting and all-target Clippy with warnings denied.
+- [x] Isolated installer/package fixture tests.
+- [x] Baseline blockers repaired on this branch: MSRV process-probe compilation,
+  exact visible README inventory, percentage-forecast usage assertions, and
+  count-free PTY row/visibility/pagination checks. A Claude fixture now handles
+  asynchronous model-help probes without overwriting background-launch state.
+  Responsiveness, exact inventory/row checks, and terminal-restoration assertions
+  remain enforced. Original tracking:
   [Restore the failing baseline CI checks](https://github.com/moritzWa/agentview/issues/32).
 - [x] Compiled stock V2: actual database discovery and FTS search; private
   service registration discovery; restart with renewed registration PID;
