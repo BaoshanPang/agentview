@@ -20,9 +20,7 @@ use std::process::Stdio;
 use std::sync::Mutex;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::thread;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-use std::time::Instant;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};

@@ -34,7 +34,6 @@ use agentview::maintenance::{
     execute_completed_archive, plan_completed_archive, BulkArchiveReport,
 };
 use agentview::migration::{MigrationClient, MigrationRegistry};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 use agentview::opencode_supervisor::OpenCodeSupervisor;
 use agentview::paused::PausedSessions;
 use agentview::pi_supervisor::run_pi_supervisor_daemon;
