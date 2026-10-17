@@ -123,8 +123,104 @@ does not broadcast a command to unrelated TUIs.
   sessions. It excludes reasoning, tool payloads, and synthetic messages.
 - Mixed stores prefer migrated V2 IDs while retaining unmigrated V1 history.
   Streaming edits, message removal, and V1-to-V2 migration refresh the index.
+  This is a storage-format preference, not arbitration between live servers.
+  Keep duplicate V1/V2 IDs under V1 authority until a quiescent final handoff.
 - Hide and close retain the existing agentview lifecycle. Read-only discovery
   and FTS queries never migrate or modify the provider database.
+
+## Frozen-snapshot ownership handoff
+
+Use this only after the coordinator has fenced V1 writes and verified terminal
+tool outcomes. The coordinator must run outside the V1 server being stopped.
+Take a fresh SQLite-consistent snapshot after quiescing V1, migrate it into a
+clean V2 store, and validate the resulting messages. An old rehearsal clone is
+not an incremental migration target: the V1 migrator records completion and V2
+public import rejects existing IDs.
+
+The target must already be running. Point agentview at its verified private
+service registration and a new supervisor state directory. Handoff import does
+not start, stop, restart, or prompt the server. The first manifest requires an
+empty supervisor ownership map. Keep the target fenced from other writers
+through import and continuation admission; HTTP validation is not a transaction
+with an unrelated TUI or API client.
+
+Write a private, current-user-owned regular file (`chmod 600 handoff.json`):
+
+```json
+{
+  "version": 1,
+  "handoffID": "frozen-v1-cutover-2026-10-17",
+  "endpoint": {
+    "url": "http://127.0.0.1:49152",
+    "pid": 12345
+  },
+  "sessions": [
+    {
+      "id": "ses_example",
+      "title": "Finish the frozen task",
+      "directory": "/work/project",
+      "agent": "build",
+      "model": {"providerID": "openai", "id": "model-name", "variant": "high"},
+      "lastMessageID": "msg_final_migrated_projection",
+      "createdAtMs": 1792270000000,
+      "updatedAtMs": 1792270100000,
+      "sourceState": "interrupted",
+      "resume": true,
+      "toolsSettled": true,
+      "externalActionsSettled": true
+    }
+  ]
+}
+```
+
+Read metadata from target `GET /api/session/{id}` after migration. Use the exact
+target agent/model/variant, timestamps, title, and location. `agent` and `model`
+may be null. `lastMessageID` is the newest projected message returned by target
+`GET /api/session/{id}/message?limit=1`, including a migration notice or control
+message. It may be null only for an empty transcript. The endpoint uses the
+verified loopback URL and current `/api/info` process ID.
+
+`sourceState` is `interrupted`, `completed`, `awaitingInput`, or `uncertain`.
+Only `interrupted` entries may set `resume: true`, and both settled flags must
+then be true. Those flags attest the coordinator's checks; they do not prove
+external actions are exactly-once. Completed, waiting, and uncertain entries
+can be adopted with `resume: false` for deliberate native recovery later.
+
+```sh
+/path/to/agentview-test --opencode-bin /path/to/opencode-v2 \
+  opencode handoff-import /private/path/handoff.json
+
+# Separate explicit operation; import itself never resumes a session.
+/path/to/agentview-test --opencode-bin /path/to/opencode-v2 \
+  opencode handoff-resume frozen-v1-cutover-2026-10-17
+```
+
+Import validates the entire batch before granting ownership. It checks the
+authenticated endpoint, exact session metadata and transcript watermark, and
+absence of active execution. Selected roots must be top-level interrupted
+assistant turns. Pending session forms or permissions, successful/failed terminal
+outcomes, completed assistant replies, pending/running tool calls, and migrated
+`tool.interrupted` outcomes block automatic continuation. Unknown manifest
+fields and duplicate session IDs are rejected.
+
+The private `$XDG_STATE_HOME/agentview/opencode/handoffs.json` journal stores the
+exact manifest and a random `msg_...` input ID for each selected root. Agentview
+fsyncs those IDs before adopting ownership or sending any continuation. Each
+resume checks the target inbox and projected transcript for that same ID before
+posting. A lost HTTP ACK or process restart therefore reuses the durable ID or
+records it as already accepted. Re-importing the identical manifest is
+idempotent; changing a recorded manifest cannot expand its authority.
+
+Adopted sessions gain the ordinary managed Reply/Interrupt controls and exact
+session attach. Source creation timestamps and titles remain intact. Existing
+V1 records and behavior remain separate.
+
+Ordinary server restart does not inject an anonymous second `continue` into an
+unfinished handoff continuation. Run `handoff-resume` again to reconcile its
+admission receipt. If V2 execution itself was interrupted after admission, use
+native recovery to inspect the new tool outcomes. A genuinely new user input
+ends that initial handoff protection and returns to ordinary restart behavior.
+The journal deduplicates input admission, not tool execution.
 
 ## Verification
 
@@ -141,6 +237,10 @@ The opt-in real CLI contract uses the isolated environment above:
 export AGENTVIEW_REAL_OPENCODE_BIN=/absolute/path/to/opencode-v2
 python3 ~/.claude/scripts/heavy-job.py --wait -- \
   cargo test --test opencode_v2 -- --ignored --nocapture
+
+# Actual imported-session adoption, managed controls, and lost-ACK replay:
+python3 ~/.claude/scripts/heavy-job.py --wait -- \
+  cargo test --test opencode_v2_handoff -- --ignored --nocapture
 ```
 
 Recorded checks:
@@ -154,8 +254,10 @@ Recorded checks:
 - [x] Real stock V2 source lifecycle: create, prompt, reconnect, list,
   transcript, model/provider catalog, attach argv, reply, interrupt, restart,
   retained session, and verified shutdown. Passed in 5.09 seconds on macOS.
-- [x] Final library run: 708 passed, 2 ignored. The existing usage-header test
+- [x] Final library run: 711 passed, 2 ignored. The existing usage-header test
   was excluded after its failure was reproduced on untouched `9e9390f`.
+- [x] CLI unit tests: 21 passed. The real handoff test also invokes both new
+  CLI subcommands against the actual target server.
 - [x] Debug build.
 - [x] Full `--all-targets --no-fail-fast` run. README inventory and five PTY
   tests failed; the same failures were reproduced on untouched `9e9390f`
@@ -165,8 +267,47 @@ Recorded checks:
   service registration discovery; restart with renewed registration PID;
   authenticated reconnect; and shutdown. The real test uses a fresh temporary
   database and private XDG directories on every run.
-- [ ] Integrated core candidate: two live TUIs, exact-client cross-directory
-  navigation, and targeted speech pause. Stock V2 cannot verify those extensions.
+- [x] Actual unified V2 handoff test: imported existing IDs, private manifest
+  and whole-batch validation, managed Reply and successful Interrupt, pending
+  forms/permissions rejected at import, a form arriving after adoption shown as
+  Needs input and rejected at resume, completed/unselected roots never continued, and changed manifests
+  rejected. A local token-free provider keeps execution active for Interrupt.
+- [x] Lost-ACK/restart proof: restore the exact private pre-POST journal after
+  the real continuation was admitted; restart while its provider stream is
+  active; reconcile the identical manifest/input ID. The selected session has
+  exactly one `continue` user message and restart adds no anonymous second input.
+  The final guarded real handoff test passed in 2.55 seconds on macOS.
+- [x] Integrated core + UI candidate: two actual live PTYs with distinct
+  `OPENCODE_TUI_CLIENT_ID` values and different starting directories. Authenticated
+  `/api/tui/select-session` switched each exact target across directories; the
+  actual UI route/session, UI location, session title, and OSC terminal title
+  converged. The other TUI's route/location/title and terminal-title stream stayed
+  unchanged during a one-second observation window after each switch.
+- [x] Targeted `/api/tui/execute-command` dispatch: a temporary harmless TUI
+  fixture registered `speech.pause`; each target executed it exactly once while
+  the other TUI did not. The fixture only observes state and registers this
+  command; real selection and command filtering run through the candidate UI.
+  **This proves dispatch, not read-aloud/audio pause.**
+- [ ] Actual read-aloud pause remains manager-owned VM acceptance.
+
+Targeting proof (2026-10-17): source launcher from `packages/cli` passed in
+8.21 seconds; unified compiled `0.0.0-migration-ui` passed in 7.40 seconds.
+Both runs used fresh temporary HOME/XDG/config/database directories, no provider
+credentials or production plugins, and verified all server/TUI process groups
+absent after cleanup. The compiled run additionally asserted the non-target OSC
+terminal-title stream stayed unchanged. Reproduce either candidate with:
+
+```sh
+python3 ~/.claude/scripts/heavy-job.py --wait -- \
+  python3 scripts/opencode_v2_targeting.py --bin /absolute/path/to/opencode-v2
+# Source alternative; script sets cwd to packages/cli for JSX configuration:
+python3 ~/.claude/scripts/heavy-job.py --wait -- \
+  python3 scripts/opencode_v2_targeting.py --source /absolute/path/to/opencode-checkout
+```
+
+The proof defaults to a 95-second execution deadline (`--timeout`, maximum 110).
+Its `finally` terminates each private process group, escalates to SIGKILL if
+needed, verifies group disappearance, closes PTYs, and removes the temp profile.
 
 ## Remaining integration boundaries
 
@@ -175,5 +316,5 @@ Recorded checks:
 - An unmanaged stock V2 root TUI has no model flag. Agentview offers its default
   model there and rejects an explicit model before spawn. The normal managed
   launch preserves selected models through the HTTP controls.
-- A live UI test still needs the core and interface patches in the same
-  candidate. Manager owns cutover, installation, and shared-server restart.
+- Actual read-aloud/audio integration remains manager VM acceptance. Manager
+  owns quiescence, cutover, installation, and shared-server restart.

@@ -161,6 +161,11 @@ enum SessionCommand {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 enum OpenCodeCommand {
+    /// Adopt explicitly verified existing V2 sessions from a private manifest.
+    /// This does not start or resume any turns.
+    HandoffImport { manifest: PathBuf },
+    /// Admit one retry-safe continuation per explicitly selected manifest root.
+    HandoffResume { handoff_id: String },
     /// Restart the server on the same port and send `continue` to every
     /// session whose turn the restart interrupted.
     Restart,
@@ -1153,6 +1158,20 @@ fn discovery_request(cli: &Cli) -> DiscoveryRequest {
 
 fn run_opencode_command(command: &OpenCodeCommand, cli: &Cli) -> Result<()> {
     match command {
+        OpenCodeCommand::HandoffImport { manifest } => {
+            let report =
+                OpenCodeSupervisor::host(cli.opencode_bin.clone())?.import_handoff(manifest)?;
+            serde_json::to_writer_pretty(io::stdout().lock(), &report)?;
+            println!();
+            Ok(())
+        }
+        OpenCodeCommand::HandoffResume { handoff_id } => {
+            let report =
+                OpenCodeSupervisor::host(cli.opencode_bin.clone())?.resume_handoff(handoff_id)?;
+            serde_json::to_writer_pretty(io::stdout().lock(), &report)?;
+            println!();
+            Ok(())
+        }
         OpenCodeCommand::Restart => {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {

@@ -30,6 +30,10 @@ use serde_json::{json, Value};
 
 use crate::domain::SessionState;
 
+#[path = "opencode_handoff.rs"]
+mod handoff;
+pub use handoff::HandoffReport;
+
 const RECORD_VERSION: u32 = 1;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -376,10 +380,15 @@ impl OpenCodeSupervisor {
         }
         let mut blocked = BTreeSet::new();
         if record.api == ApiVersion::V2 && !record.sessions.is_empty() {
-            for route in ["/question", "/permission"] {
-                blocked.extend(request_session_ids(
-                    &self.request_json(&record, "GET", route, None)?,
-                ));
+            for directory in statuses_by_directory.keys() {
+                for route in ["/question", "/permission"] {
+                    blocked.extend(request_session_ids(&self.request_json(
+                        &record,
+                        "GET",
+                        &with_directory_query(route, directory),
+                        None,
+                    )?));
+                }
             }
         }
         Ok(record
@@ -698,22 +707,39 @@ impl OpenCodeSupervisor {
         if record.api == ApiVersion::V2 {
             let statuses = self.request_json(&record, "GET", "/session/status", None)?;
             activity.running.extend(running_session_ids(&statuses));
-            activity
-                .questions
-                .extend(request_session_ids(&self.request_json(
+            let mut locations = directories.clone();
+            for id in &activity.running {
+                let session = self.request_json(
                     &record,
                     "GET",
-                    "/question",
+                    &format!("/session/{}", url_path_segment(id)),
                     None,
-                )?));
-            activity
-                .permissions
-                .extend(request_session_ids(&self.request_json(
-                    &record,
-                    "GET",
-                    "/permission",
-                    None,
-                )?));
+                )?;
+                if let Some(directory) = session
+                    .pointer("/location/directory")
+                    .and_then(Value::as_str)
+                {
+                    locations.insert(directory.into());
+                }
+            }
+            for directory in locations {
+                activity
+                    .questions
+                    .extend(request_session_ids(&self.request_json(
+                        &record,
+                        "GET",
+                        &with_directory_query("/question", &directory),
+                        None,
+                    )?));
+                activity
+                    .permissions
+                    .extend(request_session_ids(&self.request_json(
+                        &record,
+                        "GET",
+                        &with_directory_query("/permission", &directory),
+                        None,
+                    )?));
+            }
             return Ok(activity);
         }
         for directory in directories.iter().filter(|path| path.is_dir()) {
@@ -915,6 +941,14 @@ impl OpenCodeSupervisor {
         let pending_path = self.state_dir.join(RESTART_PENDING_FILE);
         let mut unresumed = Vec::new();
         for turn in pending {
+            if record.api == ApiVersion::V2
+                && self.handoff_protects_continuation(record, &turn.id)?
+            {
+                // Migration inputs have their own durable admission IDs. A
+                // server restart must not inject a second, anonymous continue.
+                report.awaiting_input.push(turn.id);
+                continue;
+            }
             let path = with_directory_query(
                 &format!("/session/{}/prompt_async", url_path_segment(&turn.id)),
                 &turn.cwd,
@@ -1046,7 +1080,10 @@ impl OpenCodeSupervisor {
                 continue;
             }
             let mut blocked = BTreeSet::new();
-            for route in ["/question", "/permission"] {
+            for route in ["/question", "/permission"]
+                .into_iter()
+                .filter(|_| record.api == ApiVersion::V1)
+            {
                 let requests = self.request_json(
                     record,
                     "GET",
@@ -1067,6 +1104,17 @@ impl OpenCodeSupervisor {
                 )?;
                 if session.get("parentID").and_then(Value::as_str).is_some() {
                     continue;
+                }
+                if record.api == ApiVersion::V2 {
+                    for resource in ["form", "permission"] {
+                        let requests = self.request_json(
+                            record,
+                            "GET",
+                            &format!("/session/{}/{resource}", url_path_segment(&id)),
+                            None,
+                        )?;
+                        blocked.extend(request_session_ids(&requests));
+                    }
                 }
                 if blocked.contains(&id) {
                     awaiting_input.push(id);
@@ -1954,7 +2002,10 @@ fn v2_request(path: &str, body: Option<&Value>) -> Result<(String, Option<Value>
         p => format!("/api{p}"),
     };
     let mut queries = other.into_iter().map(str::to_owned).collect::<Vec<_>>();
-    if route == "/api/model" || route == "/api/provider" {
+    if matches!(
+        route.as_str(),
+        "/api/model" | "/api/provider" | "/api/form" | "/api/permission/request"
+    ) {
         if let Some(directory) = directory {
             queries.push(format!("location%5Bdirectory%5D={directory}"));
         }
@@ -1993,7 +2044,13 @@ fn v2_request(path: &str, body: Option<&Value>) -> Result<(String, Option<Value>
             if let Some(agent) = original.get("agent") {
                 settings["agent"] = agent.clone();
             }
-            body = Some(json!({"text":text,"_settings":settings}));
+            let mut prompt = json!({"text":text,"_settings":settings});
+            for field in ["id", "resume"] {
+                if let Some(value) = original.get(field) {
+                    prompt[field] = value.clone();
+                }
+            }
+            body = Some(prompt);
         }
     }
     let suffix = if queries.is_empty() {
@@ -2027,7 +2084,11 @@ fn normalize_v2_response(path: &str, mut value: Value) -> Result<Value> {
     if let Some(data) = value.get_mut("data") {
         value = data.take();
     }
-    if route.starts_with("/api/session") && !route.ends_with("/message") {
+    if route == "/api/session"
+        || route
+            .strip_prefix("/api/session/")
+            .is_some_and(|rest| !rest.contains('/') && rest != "active")
+    {
         let default_title = |session: &mut Value| {
             if session.get("id").is_some() && session.get("title").is_none() {
                 session["title"] = json!("");
@@ -3264,6 +3325,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(route, "/api/session");
+        assert_eq!(
+            super::v2_request("/question?directory=%2Fwork%2Fother", None)
+                .unwrap()
+                .0,
+            "/api/form?location%5Bdirectory%5D=%2Fwork%2Fother"
+        );
+        assert_eq!(
+            super::v2_request("/permission?directory=%2Fwork%2Fother", None)
+                .unwrap()
+                .0,
+            "/api/permission/request?location%5Bdirectory%5D=%2Fwork%2Fother"
+        );
         assert_eq!(
             body.unwrap(),
             serde_json::json!({"location":{"directory":"/work/a b"}})
