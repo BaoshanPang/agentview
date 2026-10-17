@@ -43,6 +43,17 @@ fn disclosure_containing<'a>(readme: &'a str, marker: &str) -> &'a str {
     &readme[details_start..details_end]
 }
 
+fn feature_matrix(readme: &str) -> &str {
+    let start = readme
+        .find("| Harness | Launch | Model / shell picker |")
+        .expect("README feature matrix");
+    let end = readme[start..]
+        .find("\n\n")
+        .map(|offset| start + offset)
+        .expect("end of README feature matrix");
+    &readme[start..end]
+}
+
 #[test]
 fn readme_status_badges_match_release_metadata() {
     let readme = read_readme();
@@ -70,19 +81,25 @@ fn readme_status_badges_match_release_metadata() {
 }
 
 #[test]
-fn readme_keeps_the_feature_matrix_inside_a_disclosure() {
+fn readme_keeps_the_feature_matrix_openly_visible() {
     let readme = read_readme();
-    let details = disclosure_containing(&readme, "Compare feature support by harness");
+    let heading = readme
+        .find("### Compare feature support by harness")
+        .expect("visible feature comparison heading");
+    assert_eq!(
+        readme[..heading].matches("<details>").count(),
+        readme[..heading].matches("</details>").count(),
+        "feature comparison must not be hidden in a disclosure"
+    );
+    let matrix = feature_matrix(&readme);
 
-    assert!(details.contains("Compare feature support by harness"));
-    assert!(details.contains("| Harness | Launch | Model / shell picker |"));
     for harness in public_harness_names()
         .into_iter()
         .chain(["Terminal".to_owned()])
     {
         assert!(
-            details.contains(&format!("| {harness} |")),
-            "feature disclosure is missing {harness}"
+            matrix.contains(&format!("| {harness} |")),
+            "feature matrix is missing {harness}"
         );
     }
 }
@@ -131,16 +148,18 @@ fn product_readme_and_catalog_share_one_exact_harness_inventory() {
         "README tagline must state the exact coding-harness count"
     );
 
-    let feature_rows = catalog_names
-        .iter()
-        .map(|name| {
-            readme
-                .find(&format!("| {name} |"))
-                .expect("README feature row")
-        })
+    let matrix_names = feature_matrix(&readme)
+        .lines()
+        .skip(2)
+        .map(|row| row.split('|').nth(1).expect("README harness cell").trim())
         .collect::<Vec<_>>();
-    assert!(
-        feature_rows.windows(2).all(|pair| pair[0] < pair[1]),
-        "README feature rows must follow product picker order"
+    let expected_names = catalog_names
+        .iter()
+        .map(String::as_str)
+        .chain(["Terminal"])
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matrix_names, expected_names,
+        "README feature rows must match the product picker exactly, followed by Terminal"
     );
 }
