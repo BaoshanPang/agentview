@@ -3601,7 +3601,19 @@ mod tests {
         assert!(rendered.contains("at this pace"), "{rendered}");
         assert!(rendered.contains("5h      60%   hits 100% "), "{rendered}");
         assert!(rendered.contains("week     4%   9% by reset"), "{rendered}");
-        assert!(rendered.contains("4d 0h · "), "{rendered}");
+        let weekly = rendered
+            .lines()
+            .find(|line| line.contains("week     4%   9% by reset"))
+            .unwrap();
+        // reset_parts deliberately omits the local clock on non-Unix hosts.
+        // Both platforms must retain the weekly countdown; Unix additionally
+        // shows its clock separator, while the fallback must not dangle one.
+        assert!(weekly.contains("4d 0h"), "{rendered}");
+        if cfg!(unix) {
+            assert!(weekly.contains("4d 0h · "), "{rendered}");
+        } else {
+            assert!(!weekly.contains("4d 0h ·"), "{rendered}");
+        }
     }
 
     #[test]
