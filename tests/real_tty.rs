@@ -1549,6 +1549,10 @@ fn claude_launch_stays_on_the_dashboard_and_enter_attaches_full_screen() {
         fs::write(
             &executable,
             r##"#!/bin/sh
+if [ "${1:-}" = "--help" ]; then
+  printf '%s\n' "  --model <model> Model alias (e.g. 'opus', 'sonnet', or 'haiku')."
+  exit 0
+fi
 if [ "${1:-}" = "agents" ]; then
   if [ -f "$HOME/claude-session-id" ]; then
     id=$(cat "$HOME/claude-session-id")
@@ -1566,6 +1570,10 @@ if [ "${1:-}" = "logs" ]; then
   printf '%s\n' '※ recap: foreground Claude task is backgrounded'
   exit 0
 fi
+case " $* " in
+  *" --background "*) ;;
+  *) printf 'unexpected Claude arguments: %s\n' "$*" >&2; exit 64 ;;
+esac
 printf '%s' 'deadbeef-91dc-4b50-a43f-6db2837576fe' > "$HOME/claude-session-id"
 printf '%s\n' "$*" > "$HOME/claude-launch-arguments"
 sleep 0.3
@@ -1638,7 +1646,10 @@ printf '%s\n' 'backgrounded · deadbeef'
     assert!(returned.contains("backgrounded new-claude-task"));
     let arguments = fs::read_to_string(app.home_path().join("claude-launch-arguments"))
         .expect("read Claude launch arguments");
-    assert!(arguments.contains("--background build the foreground feature"));
+    assert!(
+        arguments.contains("--background build the foreground feature"),
+        "unexpected launch arguments: {arguments}"
+    );
     assert!(!arguments.contains("--session-id"));
     app.exit_cleanly();
 }
