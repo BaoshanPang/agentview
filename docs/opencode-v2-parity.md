@@ -261,14 +261,22 @@ Recorded checks:
   retained session, and verified shutdown. Passed in 5.09 seconds on macOS.
 - [x] Complete local macOS `cargo test --locked` runs on both Rust 1.75.0 and
   stable passed without name filters or exclusions. Each run includes 712
-  library tests, 21 CLI tests, 5 README tests, and 24 real-PTY tests. Existing
-  opt-in provider/benchmark tests retain their original ignored status; no
+  library tests, 21 CLI tests, 5 README tests, and 24 real-PTY tests. The
+  repository's pre-existing ignored annotations retain their original status; no
   additional tests were ignored or skipped to make these runs pass.
 - [x] CLI unit tests: 21 passed. The real handoff test also invokes both new
   CLI subcommands against the actual target server.
 - [x] Debug build.
 - [x] Rust 1.75 formatting and all-target Clippy with warnings denied.
 - [x] Isolated installer/package fixture tests.
+- [x] Five restart fixtures normally ignored on macOS were explicitly enabled
+  and passed on Rust 1.75. Reboot recovery now reads real persisted SQLite rows;
+  behavioral checks exclude question-blocked, completed, child, pre-server, and
+  post-boot replies. The fixture no longer simulates production SQL output.
+- [x] Windows common supervisor/CLI imports type-check across library, binary,
+  and test targets for `x86_64-pc-windows-msvc`.
+  The local cross-check uses host SQLite pkg-config metadata only; native Windows
+  C compilation, linking, tests, and startup remain the CI runner's checks.
 - [x] Baseline blockers repaired on this branch: MSRV process-probe compilation,
   exact visible README inventory, percentage-forecast usage assertions, and
   count-free PTY row/visibility/pagination checks. A Claude fixture now handles
