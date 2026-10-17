@@ -137,8 +137,7 @@ for unattended runs.
 
 agentview brings 18 local coding harnesses plus Terminal into one dashboard: [Claude Code](https://github.com/anthropics/claude-code), [OpenAI Codex](https://github.com/openai/codex), [Pi](https://pi.dev), [OpenCode](https://github.com/anomalyco/opencode), [Cursor](https://cursor.com/cli), [GitHub Copilot](https://github.com/github/copilot-cli), [Antigravity](https://developers.google.com/antigravity), [Mistral Vibe](https://github.com/mistralai/mistral-vibe), [Muse Code](https://dev.meta.ai/), [Qwen Code](https://github.com/QwenLM/qwen-code), [Kimi Code](https://github.com/MoonshotAI/kimi-cli), [Oh My Pi](https://github.com/can1357/oh-my-pi), [Grok](https://github.com/xai-org/grok-build), [Kilo Code](https://github.com/Kilo-Org/kilocode), [OpenHands](https://github.com/OpenHands/OpenHands-CLI), [Hermes Agent](https://github.com/NousResearch/hermes-agent), [MastraCode](https://github.com/mastra-ai/mastra/tree/main/mastracode), [Devin](https://github.com/CognitionAI/devin-cli), [Terminal](docs/cli.md).
 
-<details>
-<summary><strong>Compare feature support by harness</strong></summary>
+### Compare feature support by harness
 
 | Harness | Launch | Model / shell picker | Open / resume | Inspect | Inline reply | Approval / input | Stop | Delete / archive |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -167,8 +166,6 @@ harness's own interface.
 
 ¹ Models come from saved sessions or configs; exact model IDs also work.
 ² Prompt automation needs a Unix terminal.
-
-</details>
 
 Versions, auth, and per-harness caveats are in the
 [provider notes](docs/exploration/README.md).

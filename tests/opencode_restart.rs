@@ -106,7 +106,14 @@ fn server_killed_mid_turn(directory: &Path) -> (OpenCodeSupervisor, u32) {
     let launched = supervisor.launch("owned task", directory).unwrap();
     let cwd = directory.display().to_string();
     update_state(directory, |state| {
-        for id in ["ses_cut", "ses_asked"] {
+        for id in [
+            "ses_cut",
+            "ses_asked",
+            "ses_before",
+            "ses_after",
+            "ses_done",
+            "ses_child",
+        ] {
             state["sessions"][id] = json!({"id": id, "directory": cwd, "title": id, "time": {"created": 1, "updated": 2}});
             state["messages"][id] = json!([]);
         }
@@ -114,9 +121,47 @@ fn server_killed_mid_turn(directory: &Path) -> (OpenCodeSupervisor, u32) {
             {"info": {"role": "user", "agent": "plan", "model": {"providerID": "x", "modelID": "y"}, "time": {"created": 20}}, "parts": []},
             {"info": {"role": "assistant", "time": {"created": 21}}, "parts": []}
         ]);
-        state["unfinished"] = json!([["ses_cut", cwd, 0], ["ses_asked", cwd, 1]]);
         state["prompts"] = json!([]);
     });
+    // Recovery reads SQLite directly. Persist real V1 rows rather than
+    // teaching a CLI stub to recognize and answer the production SQL text.
+    let db = rusqlite::Connection::open(directory.join("opencode.db")).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    for (id, parent, created, completed) in [
+        ("ses_cut", None, 21, None),
+        ("ses_asked", None, 22, None),
+        ("ses_before", None, 0, None),
+        ("ses_after", None, now, None),
+        ("ses_done", None, 23, Some(24)),
+        ("ses_child", Some("ses_cut"), 24, None),
+    ] {
+        db.execute(
+            "INSERT INTO session(id,directory,parent_id,time_updated) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![id, cwd, parent, created],
+        )
+        .unwrap();
+        db.execute(
+            "INSERT INTO message(id,session_id,time_created,data) VALUES(?1,?2,?3,?4)",
+            rusqlite::params![
+                format!("msg_{id}"),
+                id,
+                created,
+                json!({"role":"assistant","time":{"completed":completed}}).to_string()
+            ],
+        )
+        .unwrap();
+    }
+    db.execute(
+        "INSERT INTO part(message_id,data) VALUES(?1,?2)",
+        rusqlite::params![
+            "msg_ses_asked",
+            json!({"type":"tool","tool":"question","state":{"status":"running"}}).to_string()
+        ],
+    )
+    .unwrap();
     supervisor.shutdown_server().unwrap();
     (supervisor, launched.server_pid)
 }
@@ -151,21 +196,9 @@ fn starting_after_a_reboot_resumes_turns_the_dead_server_left_unfinished() {
     let state = read_state(directory.path());
     let new_pid = supervisor.live_server_pid().unwrap().unwrap();
     assert_ne!(new_pid, first_pid);
-    assert!(
-        state["db_queries"][0]
-            .as_str()
-            .unwrap()
-            .contains("m.time_created >= 1 "),
-        "the scan must start at the dead server's start: {}",
-        state["db_queries"]
-    );
-    assert!(
-        state["db_queries"][0]
-            .as_str()
-            .unwrap()
-            .contains("m.time_created < "),
-        "the scan must stop at the boot, before replies a TUI runs now: {}",
-        state["db_queries"]
+    assert_eq!(
+        state["db_path_queries"], 1,
+        "reboot recovery must open the persisted source database"
     );
     assert_eq!(
         state["prompts"],
@@ -178,7 +211,7 @@ fn starting_after_a_reboot_resumes_turns_the_dead_server_left_unfinished() {
                 "model": {"providerID": "x", "modelID": "y"}
             }
         }]),
-        "only the cut-off turn resumes, never the one waiting on a question"
+        "only the cut-off turn resumes: not a question, child, completed reply, pre-server reply, or post-boot TUI turn"
     );
     assert!(!directory.path().join("state/restart-pending.json").exists());
 
@@ -189,6 +222,11 @@ fn starting_after_a_reboot_resumes_turns_the_dead_server_left_unfinished() {
         read_state(directory.path())["prompts"],
         json!([]),
         "a turn resumed once is not resumed again by the next start"
+    );
+    assert_eq!(
+        read_state(directory.path())["db_path_queries"],
+        1,
+        "a later start in the same boot must not rescan the old unfinished replies"
     );
     supervisor.shutdown_server().unwrap();
 }
@@ -210,7 +248,10 @@ fn starting_after_a_crash_without_a_reboot_leaves_unfinished_turns_alone() {
         json!([]),
         "a standalone TUI may still be running these turns"
     );
-    assert!(state.get("db_queries").is_none());
+    assert!(
+        state.get("db_path_queries").is_none(),
+        "a crash without reboot must not scan or resume possibly live standalone TUI turns"
+    );
     supervisor.shutdown_server().unwrap();
 }
 
@@ -399,6 +440,10 @@ fn real_opencode_restart_resumes_a_turn_cut_off_mid_tool_call() {
 }
 
 fn write_fake_opencode(path: &Path) {
+    let db = rusqlite::Connection::open(path.parent().unwrap().join("opencode.db")).unwrap();
+    db.execute_batch("CREATE TABLE IF NOT EXISTS session(id TEXT PRIMARY KEY,directory TEXT,parent_id TEXT,time_archived INTEGER,time_updated INTEGER);
+        CREATE TABLE IF NOT EXISTS message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT);
+        CREATE TABLE IF NOT EXISTS part(message_id TEXT,data TEXT);").unwrap();
     fs::write(
         path,
         r##"#!/usr/bin/env python3
@@ -414,18 +459,15 @@ state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server-st
 lock = threading.Lock()
 
 if len(sys.argv) < 2 or sys.argv[1] != "serve":
-    if len(sys.argv) > 2 and sys.argv[1] == "db" and "time.completed" in sys.argv[2]:
+    if sys.argv[1:] == ["db", "path"]:
         with open(state_path) as handle:
             state = json.load(handle)
-        state.setdefault("db_queries", []).append(sys.argv[2])
+        state["db_path_queries"] = state.get("db_path_queries", 0) + 1
         with open(state_path, "w") as handle:
             json.dump(state, handle)
-        print("id\tdirectory\tawaiting_input")
-        for row in state.get("unfinished", []):
-            print("\t".join(str(field) for field in row))
-    elif len(sys.argv) > 1 and sys.argv[1] == "db":
-        print("directory")
-    raise SystemExit(0)
+        print(os.path.join(os.path.dirname(state_path), "opencode.db"))
+        raise SystemExit(0)
+    raise SystemExit("unexpected fixture CLI request: " + repr(sys.argv[1:]))
 
 def load():
     try:

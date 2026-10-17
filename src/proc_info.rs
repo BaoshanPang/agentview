@@ -8,7 +8,7 @@ use std::path::PathBuf;
 #[cfg(target_os = "macos")]
 mod imp {
     use std::ffi::CStr;
-    use std::mem::{size_of, MaybeUninit};
+    use std::mem::{size_of, size_of_val, MaybeUninit};
     use std::os::raw::{c_int, c_void};
     use std::path::PathBuf;
 

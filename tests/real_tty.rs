@@ -575,7 +575,7 @@ fn opencode_move_keeps_the_same_row_and_never_hides_its_history() {
         let root = home.path();
         let fixture = root.join("sessions.json");
         let target = root.join("arca");
-        fs::create_dir(&target).unwrap();
+        fs::create_dir(target).unwrap();
         fs::write(
             &fixture,
             serde_json::to_vec(&serde_json::json!({"sessions": [{
@@ -1549,6 +1549,10 @@ fn claude_launch_stays_on_the_dashboard_and_enter_attaches_full_screen() {
         fs::write(
             &executable,
             r##"#!/bin/sh
+if [ "${1:-}" = "--help" ]; then
+  printf '%s\n' "  --model <model> Model alias (e.g. 'opus', 'sonnet', or 'haiku')."
+  exit 0
+fi
 if [ "${1:-}" = "agents" ]; then
   if [ -f "$HOME/claude-session-id" ]; then
     id=$(cat "$HOME/claude-session-id")
@@ -1566,6 +1570,10 @@ if [ "${1:-}" = "logs" ]; then
   printf '%s\n' '※ recap: foreground Claude task is backgrounded'
   exit 0
 fi
+case " $* " in
+  *" --background "*) ;;
+  *) printf 'unexpected Claude arguments: %s\n' "$*" >&2; exit 64 ;;
+esac
 printf '%s' 'deadbeef-91dc-4b50-a43f-6db2837576fe' > "$HOME/claude-session-id"
 printf '%s\n' "$*" > "$HOME/claude-launch-arguments"
 sleep 0.3
@@ -1638,7 +1646,10 @@ printf '%s\n' 'backgrounded · deadbeef'
     assert!(returned.contains("backgrounded new-claude-task"));
     let arguments = fs::read_to_string(app.home_path().join("claude-launch-arguments"))
         .expect("read Claude launch arguments");
-    assert!(arguments.contains("--background build the foreground feature"));
+    assert!(
+        arguments.contains("--background build the foreground feature"),
+        "unexpected launch arguments: {arguments}"
+    );
     assert!(!arguments.contains("--session-id"));
     app.exit_cleanly();
 }
@@ -2092,7 +2103,7 @@ fn completed_history_is_visible_by_default_and_stays_responsive() {
     let startup = Instant::now();
 
     let screen = app.wait_for("default bounded completed history", |screen| {
-        screen.contains("1000 done")
+        screen.contains("Completed")
             && screen.contains("completed-session-0000")
             && screen.contains("completed-session-0022")
             && screen.contains("Show 23 more · 977 hidden")
@@ -2147,13 +2158,14 @@ fn completed_history_is_visible_by_default_and_stays_responsive() {
     app.send(b"/completed hide");
     app.send(ENTER);
     app.wait_for("in-dashboard completed history disable", |screen| {
-        screen.contains("done hidden") && !screen.contains("completed-session-0000")
+        screen.contains("Hidden for this view · use /completed show")
+            && !screen.contains("completed-session-0000")
     });
 
     app.send(b"/completed show");
     app.send(ENTER);
     app.wait_for("in-dashboard completed history restore", |screen| {
-        screen.contains("1000 done")
+        screen.contains("Completed")
             && screen.contains("completed-session-0000")
             && screen.contains("Show 23 more · 977 hidden")
     });
@@ -2161,7 +2173,7 @@ fn completed_history_is_visible_by_default_and_stays_responsive() {
 }
 
 #[test]
-fn opencode_history_budget_stays_responsive_and_reports_more_rows() {
+fn opencode_history_budget_stays_responsive_and_limits_visible_rows() {
     let _serial = serialize_real_tty_test();
     let mut app = PtyApp::spawn_configured(120, 34, |command, home| {
         let executable = home.path().join("opencode");
@@ -2206,14 +2218,21 @@ elif "models" in sys.argv:
     });
 
     app.wait_for("active-only OpenCode startup", |screen| {
-        screen.contains("done hidden") && screen.contains("restart without --hide-completed")
+        screen.contains("Hidden for this view")
+            && screen.contains("restart without --hide-completed")
     });
     let started = Instant::now();
     app.send(b"/completed show");
     app.send(ENTER);
     let shown = app.wait_for("bounded OpenCode history", |screen| {
-        screen.contains("10 done+") && screen.contains("bounded history")
+        screen
+            .lines()
+            .filter(|line| line.contains("• bounded history "))
+            .count()
+            == 10
     });
+    assert!(shown.contains("• bounded history 10"), "{shown}");
+    assert!(!shown.contains("• bounded history 0 "), "{shown}");
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "bounded OpenCode history blocked the terminal"
@@ -2221,9 +2240,10 @@ elif "models" in sys.argv:
     assert_lines_fit(&shown, 120);
 
     app.send(DOWN);
-    let navigated = app.wait_for("bounded history stays in the header only", |screen| {
-        screen.contains("done+") && screen.contains("enter to open")
-    });
+    let navigated = app.wait_for(
+        "bounded history preserves contextual navigation",
+        |screen| screen.contains("bounded history") && screen.contains("enter to open"),
+    );
     assert!(!navigated.contains("history is limited to 10 records"));
     app.send(UP);
     app.send(b"draft");
@@ -2542,7 +2562,20 @@ fn owned_dashboard_never_starts_opencode_external_history_query_even_when_comple
         let fake_opencode = home.path().join("opencode-history-trap");
         fs::write(
             &fake_opencode,
-            "#!/bin/sh\n: > \"$AGENTVIEW_OPENCODE_HISTORY_CALLED\"\nsleep 2\nexit 1\n",
+            // Capability/path probes and background-shell status lookup are
+            // legitimate even without external history. The latter depends
+            // on logs in the machine's shared temp directory, so answer it
+            // explicitly; every other SQL query must still trip the trap.
+            r#"#!/bin/sh
+if [ "${1:-}" = db ] && [ "${2:-}" != path ]; then
+  case "$2" in
+    *"FROM part p JOIN session s"*) printf 'record\n'; exit 0 ;;
+  esac
+  printf '%s\n' "$@" > "$AGENTVIEW_OPENCODE_HISTORY_CALLED"
+  sleep 2
+fi
+exit 1
+"#,
         )
         .expect("write OpenCode history trap");
         fs::set_permissions(&fake_opencode, fs::Permissions::from_mode(0o755))
@@ -2570,16 +2603,20 @@ fn owned_dashboard_never_starts_opencode_external_history_query_even_when_comple
     let startup = Instant::now();
 
     app.wait_for("OpenCode history-free default startup", |screen| {
-        screen.contains("0 done") && !screen.contains("loading provider sessions")
+        screen.contains("Finished sessions wait here for you to review")
+            && !screen.contains("loading provider sessions")
+            && !screen.contains("loading remaining providers")
     });
 
     assert!(
-        startup.elapsed() < Duration::from_millis(750),
-        "default dashboard waited on OpenCode completed history"
+        !app.home_path().join("opencode-history-called").exists(),
+        "OpenCode external history ran without --include-external: {}",
+        fs::read_to_string(app.home_path().join("opencode-history-called")).unwrap_or_default()
     );
     assert!(
-        !app.home_path().join("opencode-history-called").exists(),
-        "OpenCode external history ran without --include-external"
+        startup.elapsed() < Duration::from_millis(750),
+        "default dashboard waited on OpenCode completed history: {:?}",
+        startup.elapsed()
     );
     app.exit_cleanly();
 }
@@ -2596,8 +2633,28 @@ fn wide_real_tty_exercises_primary_interactions_and_restores_terminal() {
             && screen.contains("schema-migration")
             && screen.contains("release-reviewer")
             && screen.contains("Unknown")
-            && screen.contains("2 awaiting · 4 working · 2 done")
     });
+    assert_eq!(
+        startup
+            .lines()
+            .filter(|line| line.trim_start().starts_with('✱'))
+            .count(),
+        3
+    );
+    assert_eq!(
+        startup
+            .lines()
+            .filter(|line| line.trim_start().starts_with('✳') || line.trim_start().starts_with('·'))
+            .count(),
+        3
+    );
+    assert_eq!(
+        startup
+            .lines()
+            .filter(|line| line.trim_start().starts_with('•'))
+            .count(),
+        2
+    );
     assert_lines_fit(&startup, 120);
     assert!(startup.contains("release-reviewer"));
     assert!(startup.contains("Unknown"));
@@ -3012,7 +3069,8 @@ fn narrow_and_tiny_real_ttys_have_bounded_fallback_layouts() {
     let expected_version = format!("agentview v{}", env!("CARGO_PKG_VERSION"));
     let startup = narrow.wait_for("narrow startup", |screen| {
         screen.contains(&expected_version)
-            && screen.contains("2 awaiting · 4 working · 2 done")
+            && screen.contains("Needs input")
+            && screen.contains("Working")
             && screen.contains("release-reviewer")
             && screen.contains("? shortcuts")
             && !screen.contains("status view")
