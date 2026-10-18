@@ -487,6 +487,9 @@ fn main() -> Result<()> {
     configure_platform_environment()?;
     let mut cli = Cli::parse();
     resolve_default_provider_bins(&mut cli);
+    if cli.command.is_none() && !cli.json {
+        agentview::perf_log::use_default_file();
+    }
     if let Some(command) = cli.command.as_ref() {
         match command {
             Commands::Update => run_self_update()?,

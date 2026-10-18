@@ -270,11 +270,17 @@ disables it. The terminal tab title shows the same counts, for example
 
 ### Timing log
 
-`AGENTVIEW_PERF_LOG=/tmp/av.log agentview` appends one line per event on the
-open and refresh paths: each provider's discovery time, how long an open waited
-for the hidden OpenCode TUI and why it went ahead, the preview's switch and
-draw, the first keystrokes' echo latency, and any wait on or long hold of the
-OpenCode state lock with its call site. Nothing is written without it.
+The dashboard appends one line per event on the open and refresh paths to
+`~/.local/state/agentview/perf.log` (under `$XDG_STATE_HOME` when set), rotated
+to `perf.log.1` at 4 MB: each provider's discovery time, every Enter on a row
+(`open-key`) with whether the hidden OpenCode TUI was ready, an open that waited
+for it (`open-deferred`), was cancelled (`open-cancelled`) or went ahead
+(`open-dispatch`), how it ended (`open-result`), the preview's switch and draw
+or why it skipped, the first keystrokes' echo latency, any wait on or long hold
+of the OpenCode state lock with its call site, and `dashboard-stall` when the
+dashboard loop stops turning for 1.5 s outside a native session.
+`AGENTVIEW_PERF_LOG=/tmp/av.log` writes elsewhere; `AGENTVIEW_PERF_LOG=off`
+turns it off.
 
 OpenCode history queries read OpenCode's database file directly, read-only,
 instead of starting `opencode db` for each one. `opencode-db` lines show each

@@ -367,8 +367,10 @@ pub fn run_dashboard(
     let mut preview_candidate: Option<(String, Instant)> = None;
     let mut previewed_row: Option<(String, u64)> = None;
     let mut pending_open: Option<PendingOpen> = None;
+    watchdog::spawn();
 
     let result = 'dashboard: loop {
+        watchdog::set_phase(watchdog::Phase::Updates);
         loop {
             match snapshot_rx.try_recv() {
                 Ok((mut snapshot, complete)) => {
@@ -673,6 +675,7 @@ pub fn run_dashboard(
             needs_draw |= app.advance_live_animation();
             next_live_animation = Instant::now() + LIVE_SESSION_ANIMATION_INTERVAL;
         }
+        watchdog::set_phase(watchdog::Phase::PendingOpen);
         if let Some(pending) = pending_open.take() {
             match app
                 .selected_session()
@@ -717,9 +720,15 @@ pub fn run_dashboard(
                         }
                     }
                 }
-                None => {}
+                None => crate::perf!(
+                    "open-cancelled",
+                    "session={} after={} reason=selection-moved",
+                    pending.session_id,
+                    crate::perf_log::ms(pending.since.elapsed()),
+                ),
             }
         }
+        watchdog::set_phase(watchdog::Phase::Preview);
         let selected = app.selected_session().map(|session| session.id.as_str());
         if preview_candidate.as_ref().map(|(id, _)| id.as_str()) != selected {
             preview_candidate = selected.map(|id| (id.to_owned(), Instant::now()));
@@ -778,6 +787,7 @@ pub fn run_dashboard(
             needs_draw = true;
         }
         if needs_draw {
+            watchdog::set_phase(watchdog::Phase::Draw);
             terminal.terminal.draw(|frame| ui::render(frame, &app))?;
             terminal.set_title(&ui::terminal_title(&app));
             needs_draw = false;
@@ -793,7 +803,9 @@ pub fn run_dashboard(
         } else {
             Duration::from_millis(50)
         };
+        watchdog::set_phase(watchdog::Phase::Wait);
         if event_reader.poll(until_refresh.min(poll))? {
+            watchdog::set_phase(watchdog::Phase::Key);
             for event_index in 0..MAX_READY_EVENTS_PER_TICK {
                 let event = match event_reader.read()? {
                     Event::Key(key) => {
@@ -839,11 +851,25 @@ pub fn run_dashboard(
                             );
                             action = AppAction::None;
                         }
-                        pending_open = None;
+                        // A key release (the kitty protocol reports them) is
+                        // not a new keypress and leaves a waiting open alone.
+                        let waiting = if key.kind == KeyEventKind::Release {
+                            None
+                        } else {
+                            pending_open.take()
+                        };
                         if let AppAction::Open { session_id } = &action {
+                            let ready = app
+                                .session_by_id(session_id)
+                                .map(|session| control.native_open_ready(session));
+                            crate::perf!(
+                                "open-key",
+                                "session={session_id} ready={ready:?} waiting={}",
+                                waiting.is_some()
+                            );
                             if let Some(session) = app
                                 .session_by_id(session_id)
-                                .filter(|session| control.native_open_ready(session) == Some(false))
+                                .filter(|_| ready == Some(Some(false)))
                             {
                                 let previewing =
                                     Some((session_id.clone(), control.preview_generation()));
@@ -852,14 +878,32 @@ pub fn run_dashboard(
                                     previewed_row =
                                         Some((session_id.clone(), control.preview_generation()));
                                 }
-                                crate::perf!("open-deferred", "session={session_id} from=key");
-                                pending_open = Some(PendingOpen {
-                                    session_id: session_id.clone(),
-                                    since: Instant::now(),
-                                    deadline: Instant::now() + DEFERRED_OPEN_TIMEOUT,
+                                // Pressing Enter again while it waits keeps
+                                // the original deadline instead of restarting it.
+                                pending_open = Some(match waiting {
+                                    Some(waiting) if waiting.session_id == *session_id => waiting,
+                                    _ => {
+                                        crate::perf!(
+                                            "open-deferred",
+                                            "session={session_id} from=key"
+                                        );
+                                        PendingOpen {
+                                            session_id: session_id.clone(),
+                                            since: Instant::now(),
+                                            deadline: Instant::now() + DEFERRED_OPEN_TIMEOUT,
+                                        }
+                                    }
                                 });
                                 action = AppAction::None;
                             }
+                        } else if let Some(waiting) = waiting {
+                            crate::perf!(
+                                "open-cancelled",
+                                "session={} after={} key={:?}",
+                                waiting.session_id,
+                                crate::perf_log::ms(waiting.since.elapsed()),
+                                key.code,
+                            );
                         }
                         let mut effect = match action {
                             AppAction::SetPaused { session_id, paused } => {
@@ -2547,15 +2591,30 @@ fn handle_action_legacy<T: DashboardTerminal, C: DashboardControl>(
                 .find(|session| session.id == session_id)
                 .cloned()
             else {
+                crate::perf!("open-result", "session={session_id} error=disappeared");
                 app.set_notice("the selected session disappeared during refresh");
                 return false;
             };
             if let Err(error) = terminal.suspend_dashboard() {
+                crate::perf!(
+                    "open-result",
+                    "session={session_id} error=suspend: {error:#}"
+                );
                 app.set_notice(format!("failed to suspend dashboard: {error:#}"));
                 return false;
             }
+            let started = Instant::now();
             let result = control.open_session(&session);
             let resume_result = terminal.resume_dashboard();
+            crate::perf!(
+                "open-result",
+                "session={session_id} in_front={} {}",
+                crate::perf_log::ms(started.elapsed()),
+                match &result {
+                    Ok(outcome) => format!("ok={:?}", outcome.message),
+                    Err(error) => format!("error={error:#}"),
+                }
+            );
             match (result, resume_result) {
                 (Ok(outcome), Ok(())) => app.set_notice(outcome.message),
                 (Err(error), Ok(())) => {
@@ -2805,11 +2864,105 @@ impl TerminalSession {
 
 impl DashboardTerminal for TerminalSession {
     fn suspend_dashboard(&mut self) -> Result<()> {
+        watchdog::set_phase(watchdog::Phase::Front);
         self.suspend()
     }
 
     fn resume_dashboard(&mut self) -> Result<()> {
-        self.resume()
+        let resumed = self.resume();
+        watchdog::set_phase(watchdog::Phase::Dispatch);
+        resumed
+    }
+}
+
+/// Logs when the dashboard loop stops turning, and in which phase, so a
+/// dashboard that ignores keys leaves a trace before it is restarted. Time
+/// spent with a native session in front is not a stall.
+mod watchdog {
+    use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+    use std::time::{Duration, Instant};
+
+    const STALL_AFTER: Duration = Duration::from_millis(1500);
+
+    #[derive(Clone, Copy)]
+    #[repr(u8)]
+    pub enum Phase {
+        Wait = 0,
+        Updates = 1,
+        PendingOpen = 2,
+        Preview = 3,
+        Draw = 4,
+        Key = 5,
+        Dispatch = 6,
+        Front = 7,
+    }
+
+    const NAMES: [&str; 8] = [
+        "wait",
+        "updates",
+        "pending-open",
+        "preview",
+        "draw",
+        "key",
+        "dispatch",
+        "front",
+    ];
+
+    static PHASE: AtomicU8 = AtomicU8::new(Phase::Wait as u8);
+    static TICK_MS: AtomicU64 = AtomicU64::new(0);
+
+    fn epoch() -> Instant {
+        static EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        *EPOCH.get_or_init(Instant::now)
+    }
+
+    fn now_ms() -> u64 {
+        epoch().elapsed().as_millis() as u64
+    }
+
+    pub fn set_phase(phase: Phase) {
+        PHASE.store(phase as u8, Ordering::Relaxed);
+        TICK_MS.store(now_ms(), Ordering::Relaxed);
+    }
+
+    /// Watch the loop while the perf log is on.
+    pub fn spawn() {
+        if !crate::perf_log::enabled() {
+            return;
+        }
+        set_phase(Phase::Wait);
+        let _ = std::thread::Builder::new()
+            .name("dashboard-watchdog".into())
+            .spawn(|| {
+                let mut stalled_since: Option<u64> = None;
+                loop {
+                    std::thread::sleep(Duration::from_millis(250));
+                    let tick = TICK_MS.load(Ordering::Relaxed);
+                    let phase = PHASE.load(Ordering::Relaxed);
+                    let stuck = phase != Phase::Front as u8
+                        && now_ms().saturating_sub(tick) >= STALL_AFTER.as_millis() as u64;
+                    match (stalled_since, stuck) {
+                        (None, true) => {
+                            stalled_since = Some(tick);
+                            crate::perf!(
+                                "dashboard-stall",
+                                "phase={} for={}ms",
+                                NAMES[phase as usize],
+                                now_ms() - tick
+                            );
+                        }
+                        (Some(since), false) if tick != since => {
+                            crate::perf!(
+                                "dashboard-stall-end",
+                                "stalled={}ms",
+                                tick.saturating_sub(since)
+                            );
+                            stalled_since = None;
+                        }
+                        _ => {}
+                    }
+                }
+            });
     }
 }
 

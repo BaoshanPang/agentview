@@ -233,12 +233,22 @@ impl ProviderController for OpenCodeController {
         {
             return None;
         }
-        let (_, reach) = supervisor.known_client_reach()?;
+        let (server_pid, reach) = supervisor.known_client_reach()?;
         if reach == SharedClientReach::None {
             return None;
         }
         let (key, _) = shared_client_for(reach, &session.cwd);
         if !crate::native_session::is_backgrounded(&key) {
+            return None;
+        }
+        // After a server restart no preview can switch the parked TUI (it is
+        // replaced on open instead), so waiting for one would only stall the
+        // open until its deadline.
+        let parked_on = shared_clients()
+            .lock()
+            .ok()
+            .and_then(|clients| clients.get(&key).map(|shared| shared.server_pid));
+        if parked_on != Some(server_pid) || !crate::holds::process_alive(server_pid) {
             return None;
         }
         Some(previewed_shared_client(&session.id).is_some())
@@ -806,6 +816,43 @@ impl OpenCodeController {
         Ok(())
     }
 
+    /// Replace the TUI shared by every directory when it was started against
+    /// a server that has since been replaced, so previews and opens switch it
+    /// again instead of waiting on a TUI no preview can move. Never starts a
+    /// server. Returns whether it replaced one.
+    fn replace_stale_shared_client(&self) -> Result<bool> {
+        let Some(supervisor) = self.supervisor.as_ref() else {
+            return Ok(false);
+        };
+        let Some(live) = supervisor.live_server_pid()? else {
+            return Ok(false);
+        };
+        if supervisor.shared_client_reach()? != SharedClientReach::AnyDirectory {
+            return Ok(false);
+        }
+        let cwd = std::env::current_dir()?;
+        let (key, _) = shared_client_for(SharedClientReach::AnyDirectory, &cwd);
+        {
+            let _gate = SHARED_CLIENT_GATE
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let parked_on = shared_clients()
+                .lock()
+                .ok()
+                .and_then(|clients| clients.get(&key).map(|shared| shared.server_pid));
+            if parked_on == Some(live) || !crate::native_session::is_backgrounded(&key) {
+                return Ok(false);
+            }
+            crate::native_session::terminate(&key)
+                .context("could not replace the parked OpenCode frontend")?;
+            if let Ok(mut clients) = shared_clients().lock() {
+                clients.remove(&key);
+            }
+        }
+        self.warm_shared_client()?;
+        Ok(true)
+    }
+
     /// Switch the parked shared TUI to `session` while it is hidden, so an
     /// open paints the session at once instead of the one shown before.
     /// Never starts a server or a TUI. It must finish well inside the time a
@@ -833,10 +880,22 @@ impl OpenCodeController {
                 .owned_session_cwd(&session.provider_session_id)?
                 .unwrap_or_else(|| session.cwd.clone()),
         );
-        if reach == SharedClientReach::None
-            || !crate::holds::process_alive(server_pid)
-            || !cwd.is_dir()
-        {
+        if reach == SharedClientReach::None || !cwd.is_dir() {
+            return Ok(());
+        }
+        if !crate::holds::process_alive(server_pid) {
+            // The server restarted under the parked TUI. Start a fresh one
+            // against the new server now rather than on the next open.
+            let replaced = self.replace_stale_shared_client();
+            crate::perf!(
+                "preview",
+                "session={} skipped=server-gone old_pid={server_pid} replaced={}",
+                session.provider_session_id,
+                match &replaced {
+                    Ok(replaced) => replaced.to_string(),
+                    Err(error) => format!("{error:#}"),
+                }
+            );
             return Ok(());
         }
         let (key, client) = shared_client_for(reach, &cwd);
@@ -858,7 +917,24 @@ impl OpenCodeController {
         });
         match current {
             Some((pid, false)) if pid == server_pid => {}
-            _ => return Ok(()),
+            Some((_, true)) => return Ok(()),
+            other => {
+                let parked_on = other.map(|(pid, _)| pid);
+                drop(_gate);
+                let replaced = match parked_on {
+                    Some(_) => self
+                        .replace_stale_shared_client()
+                        .map(|done| done.to_string()),
+                    None => Ok("no".into()),
+                };
+                crate::perf!(
+                    "preview",
+                    "session={} skipped=parked-elsewhere parked_on={parked_on:?} server={server_pid} replaced={}",
+                    session.provider_session_id,
+                    replaced.unwrap_or_else(|error| format!("{error:#}")),
+                );
+                return Ok(());
+            }
         }
         // The TUI repaints the new session before the switch returns; until
         // then its screen must not speak for the row it showed before.
