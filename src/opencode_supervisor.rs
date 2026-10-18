@@ -37,7 +37,8 @@ const RECORD_VERSION: u32 = 1;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_HEADER_BYTES: usize = 64 * 1024;
-const MAX_BODY_BYTES: usize = 2 * 1024 * 1024;
+// Imported V2 user messages can individually exceed 2 MiB.
+const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// A restart must not be abandoned halfway, so a server that ignores SIGTERM
 /// this long is killed.

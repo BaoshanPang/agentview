@@ -270,12 +270,42 @@ impl OpenCodeSupervisor {
         if running_session_ids(&statuses).contains(&entry.id) {
             bail!("handoff session {} is executing", entry.id);
         }
-        let messages = self.request_json(
+        let mut messages = self.request_json(
             record,
             "GET",
-            &format!("/session/{}/message", url_path_segment(&entry.id)),
+            &format!(
+                "/session/{}/message{}",
+                url_path_segment(&entry.id),
+                // Adoption needs only the watermark; long imported histories
+                // exceed the HTTP body limit. Resumption still validates tools.
+                if entry.resume { "" } else { "?limit=1" }
+            ),
             None,
         )?;
+        if !entry.resume {
+            // Keep continuation protection's user watermark without loading
+            // every historical message just to find that one ID.
+            let users = self.request_json(
+                record,
+                "GET",
+                &format!(
+                    "/session/{}/message?limit=1&type=user",
+                    url_path_segment(&entry.id)
+                ),
+                None,
+            )?;
+            if let Some(user) = users.as_array().and_then(|items| items.last()) {
+                let rows = messages
+                    .as_array_mut()
+                    .context("invalid handoff transcript")?;
+                if !rows
+                    .iter()
+                    .any(|item| item["info"]["id"] == user["info"]["id"])
+                {
+                    rows.insert(0, user.clone());
+                }
+            }
+        }
         let newest = messages
             .as_array()
             .and_then(|a| a.last())

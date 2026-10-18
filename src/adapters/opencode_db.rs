@@ -212,17 +212,25 @@ pub(crate) fn install_compatibility_views(db: &Connection) -> Result<bool> {
     if !has_table(db, "session_v2")? {
         return Ok(false);
     }
-    let legacy_session = if has_table(db, "session")? {
+    // Keeping empty legacy UNION branches prevents indexed latest-message
+    // lookups on fully migrated stores and scans large historical payloads.
+    let legacy = has_table(db, "session")?
+        && db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.session WHERE id NOT IN (SELECT id FROM main.session_v2))",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+    let legacy_session = if legacy {
         "UNION ALL SELECT id, title, project_id, directory, parent_id, time_created, time_updated, time_archived FROM main.session WHERE id NOT IN (SELECT id FROM main.session_v2)"
     } else {
         ""
     };
-    let legacy_message = if has_table(db, "message")? {
+    let legacy_message = if legacy && has_table(db, "message")? {
         "UNION ALL SELECT id, session_id, time_created, time_updated, data, time_created AS sort_seq FROM main.message WHERE session_id NOT IN (SELECT id FROM main.session_v2)"
     } else {
         ""
     };
-    let legacy_part = if has_table(db, "part")? {
+    let legacy_part = if legacy && has_table(db, "part")? {
         "UNION ALL SELECT id, message_id, session_id, time_created, time_updated, data FROM main.part WHERE session_id NOT IN (SELECT id FROM main.session_v2)"
     } else {
         ""

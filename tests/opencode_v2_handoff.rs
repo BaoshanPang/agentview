@@ -171,9 +171,20 @@ fn import_projection(
         assistant["error"] =
             json!({"type":"aborted","message":"Source stopped at a tool-safe boundary"});
     }
-    let messages = json!([
-        {"id":format!("msg_{id}_user"),"type":"user","text":"Original frozen task","time":{"created":start}},
-        assistant
+    let mut messages = Vec::new();
+    if completed {
+        // More than the supervisor's 4 MiB HTTP limit in total, while a recent
+        // page stays small. Adoption must not download the entire transcript.
+        for index in 0..160 {
+            messages.push(
+                json!({"id":format!("msg_{id}_history_{index}"),"type":"user",
+                "text":"historical text ".repeat(2048),"time":{"created":start}}),
+            );
+        }
+    }
+    messages.extend([
+        json!({"id":format!("msg_{id}_user"),"type":"user","text":if completed { "Original frozen task ".repeat(150_000) } else { "Original frozen task".to_owned() },"time":{"created":start}}),
+        assistant,
     ]);
     api.call(
         "POST",
@@ -366,6 +377,13 @@ fn real_v2_adopts_imported_sessions_and_reconciles_lost_ack_after_restart() {
     );
     let checkpoint = fs::read(state.join("handoffs.json")).unwrap();
     let ledger: Value = serde_json::from_slice(&checkpoint).unwrap();
+    for id in ["ses_migrated_complete", "ses_migrated_unselected"] {
+        assert_eq!(
+            ledger["handoffs"]["frozen-v1-cutover"]["roots"][id]["lastUserId"],
+            json!(format!("msg_{id}_user")),
+            "bounded adoption must preserve the user watermark"
+        );
+    }
     let input = ledger["handoffs"]["frozen-v1-cutover"]["roots"]["ses_migrated_selected"]
         ["inputId"]
         .as_str()
