@@ -1,6 +1,7 @@
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::thread;
@@ -444,9 +445,7 @@ fn write_fake_opencode(path: &Path) {
     db.execute_batch("CREATE TABLE IF NOT EXISTS session(id TEXT PRIMARY KEY,directory TEXT,parent_id TEXT,time_archived INTEGER,time_updated INTEGER);
         CREATE TABLE IF NOT EXISTS message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT);
         CREATE TABLE IF NOT EXISTS part(message_id TEXT,data TEXT);").unwrap();
-    fs::write(
-        path,
-        r##"#!/usr/bin/env python3
+    let script = r##"#!/usr/bin/env python3
 import base64
 import json
 import os
@@ -576,8 +575,22 @@ class Handler(BaseHTTPRequestHandler):
         return self.respond(404, {"error": "unknown"})
 
 ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
-"##,
-    )
-    .unwrap();
+"##;
+    // Another test can fork while a fixture is being written. Even a
+    // CLOEXEC write fd may remain in that sibling until exec, making this
+    // script fail with Linux ETXTBSY. Keep executable-writing descriptors
+    // entirely out of the parent: the writer exits before we publish it.
+    let mut writer=std::process::Command::new("python3")
+        .args(["-c","import sys\nwith open(sys.argv[1], 'wb') as output:\n    output.write(sys.stdin.buffer.read())\n"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn().unwrap();
+    writer
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    assert!(writer.wait().unwrap().success(), "fixture writer failed");
     fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
