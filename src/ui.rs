@@ -3540,17 +3540,17 @@ mod tests {
             },
             crate::usage::Usage {
                 provider: "codex",
-                // 20% eleven hours in runs out in about 2 days.
+                // 20% eleven hours in, counted as a day's use, runs out in 4 more days.
                 windows: vec![window("week", 20.0, 6 * 86_400 + 13 * 3600)],
             },
         ];
         let wide = usage_header_rows(&usages, now, 130);
         assert!(wide[0].matches("by reset").count() == 2, "{wide:?}");
-        // 20% eleven hours in: 305% by the reset, shown as a percent like the rest.
-        assert!(wide[1].contains("~305% by reset"), "{wide:?}");
+        // 20% eleven hours in: 140% by the reset, shown as a percent like the rest.
+        assert!(wide[1].contains("~140% by reset"), "{wide:?}");
         let mid = usage_header_rows(&usages, now, 100);
         assert!(mid[0].matches('→').count() == 2, "{mid:?}");
-        assert!(mid[1].contains("→305%"), "{mid:?}");
+        assert!(mid[1].contains("→140%"), "{mid:?}");
         assert!(mid.iter().all(|row| display_width(row) <= 100), "{mid:?}");
         let narrow = usage_header_rows(&usages, now, 78);
         assert!(

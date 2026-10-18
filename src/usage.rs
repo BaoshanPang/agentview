@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(300);
+const DAY: u64 = 86_400;
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 
@@ -136,23 +137,41 @@ impl Window {
         }
     }
 
-    /// Linear projection from the average rate since the window started.
-    pub fn pace(&self, now: u64) -> Option<Pace> {
-        if self.percent >= 100.0 {
-            return None;
-        }
+    /// Window length and the span the average rate is taken over, or `None`
+    /// while too little of the window has passed.
+    fn rate_span(&self, now: u64) -> Option<Option<(u64, u64)>> {
         let length = self.length()?;
         let elapsed = length - self.resets_at?.saturating_sub(now).min(length);
         // A tenth of the window, but never more than 6h: a week would otherwise
         // show nothing for its first 17 hours, right when you want a forecast.
         if elapsed < (length / 10).min(6 * 3600) {
-            return Some(Pace::TooEarly);
+            return Some(None);
         }
-        let projected = self.percent * length as f64 / elapsed as f64;
+        // Use comes in bursts while you are awake, so a busy first evening
+        // spread over the clock reads as 10x the week (39% in 6h showed
+        // `→>999%`). Until a full day has passed, count the window's use so
+        // far as that day's use instead.
+        let span = if length > DAY {
+            elapsed.max(DAY)
+        } else {
+            elapsed
+        };
+        Some(Some((length, span)))
+    }
+
+    /// Linear projection from the average rate since the window started.
+    pub fn pace(&self, now: u64) -> Option<Pace> {
+        if self.percent >= 100.0 {
+            return None;
+        }
+        let Some((length, span)) = self.rate_span(now)? else {
+            return Some(Pace::TooEarly);
+        };
+        let projected = self.percent * length as f64 / span as f64;
         if projected < 100.0 {
             return Some(Pace::AtReset(projected));
         }
-        let per_second = self.percent / elapsed as f64;
+        let per_second = self.percent / span as f64;
         Some(Pace::HitsLimit(
             now + ((100.0 - self.percent) / per_second) as u64,
         ))
@@ -161,15 +180,11 @@ impl Window {
     /// Use at the reset if the average rate holds, past 100% included (the
     /// header shows `→307%` rather than a separate "runs out" form).
     pub fn projected_percent(&self, now: u64) -> Option<f64> {
-        match self.pace(now)? {
-            Pace::AtReset(projected) => Some(projected),
-            Pace::HitsLimit(_) => {
-                let length = self.length()?;
-                let elapsed = length - self.resets_at?.saturating_sub(now).min(length);
-                Some(self.percent * length as f64 / elapsed as f64)
-            }
-            Pace::TooEarly => None,
+        if self.percent >= 100.0 {
+            return None;
         }
+        let (length, span) = self.rate_span(now)??;
+        Some(self.percent * length as f64 / span as f64)
     }
 
     /// `Sat 3:12 PM`, or a countdown where local time is unavailable.
@@ -493,11 +508,22 @@ mod tests {
             week(5.0, 7 * day - 3600).pace(1_000_000),
             Some(Pace::TooEarly)
         );
-        // 8h into the week at 4%: projected without waiting for 17h to pass.
+        // 8h into the week at 4%: projected without waiting for 17h to pass,
+        // with the 4% counted as the first day's use (28%, not 84%).
         let Some(Pace::AtReset(early)) = week(4.0, 7 * day - 8 * 3600).pace(1_000_000) else {
             panic!("expected a projection 8h in");
         };
-        assert!((early - 84.0).abs() < 0.01, "{early}");
+        assert!((early - 28.0).abs() < 0.01, "{early}");
+        // The live case: 39% after a busy 6.4h is 273% by the reset, not >999%.
+        let busy = week(39.0, 7 * day - 23_000)
+            .projected_percent(1_000_000)
+            .unwrap();
+        assert!((busy - 273.0).abs() < 0.01, "{busy}");
+        // At 39% a day, the remaining 61% lasts about 1.56 more days.
+        let Some(Pace::HitsLimit(out)) = week(39.0, 7 * day - 23_000).pace(1_000_000) else {
+            panic!("expected a limit hit");
+        };
+        assert!((out - 1_000_000).abs_diff(135_138) < 2, "{out}");
         // The 5h window keeps its tenth (30 minutes).
         let five_hour = |left: u64| Window {
             label: "5h",
