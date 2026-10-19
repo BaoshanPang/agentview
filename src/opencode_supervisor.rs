@@ -945,6 +945,7 @@ impl OpenCodeSupervisor {
                     pending.push(turn);
                 }
             }
+            self.add_stopped_shells(record, &mut pending, &awaiting_input)?;
             report.previous_pid = Some(record.pid);
             report.awaiting_input = awaiting_input;
             save_pending_turns(&pending_path, &pending)?;
@@ -991,6 +992,7 @@ impl OpenCodeSupervisor {
                 pending.push(turn);
             }
         }
+        self.add_stopped_shells(&record, &mut pending, &awaiting_input)?;
         save_pending_turns(&pending_path, &pending)?;
         stop_server(&record, RESTART_GRACE, true)?;
         report.previous_pid = Some(record.pid);
@@ -1072,6 +1074,7 @@ impl OpenCodeSupervisor {
                     provider_id: None,
                     model_id: None,
                     variant: None,
+                    stopped_shells: Vec::new(),
                 });
             }
         }
@@ -1116,6 +1119,98 @@ impl OpenCodeSupervisor {
 
     /// Top-level sessions with a turn in flight on this server, split into
     /// those a restart can resume and those waiting on the user.
+    /// Note on each session the V2 background shells that stopping `record`
+    /// is about to kill, adding sessions whose turn already ended. Such a
+    /// session sits idle waiting for a notification that will never come.
+    fn add_stopped_shells(
+        &self,
+        record: &ServerRecord,
+        pending: &mut Vec<InterruptedTurn>,
+        awaiting_input: &[String],
+    ) -> Result<()> {
+        if record.api != ApiVersion::V2 {
+            return Ok(());
+        }
+        let mut directories = record
+            .sessions
+            .values()
+            .map(|owned| owned.cwd.clone())
+            .collect::<BTreeSet<_>>();
+        directories.extend(recent_session_directories(&record.executable));
+        let mut shells = BTreeMap::<String, (PathBuf, Vec<String>)>::new();
+        for directory in directories.into_iter().filter(|path| path.is_dir()) {
+            // A directory whose project fails to load runs no shells, and must
+            // not block the restart.
+            let Ok(listed) = self.request_json(
+                record,
+                "GET",
+                &with_directory_query("/shell", &directory),
+                None,
+            ) else {
+                continue;
+            };
+            for shell in listed.as_array().into_iter().flatten() {
+                if shell["status"] != "running" {
+                    continue;
+                }
+                let (Some(session), Some(command)) = (
+                    shell.pointer("/metadata/sessionID").and_then(Value::as_str),
+                    shell["command"].as_str(),
+                ) else {
+                    continue;
+                };
+                shells
+                    .entry(session.to_owned())
+                    .or_insert_with(|| (directory.clone(), Vec::new()))
+                    .1
+                    .push(command.to_owned());
+            }
+        }
+        for (id, (cwd, commands)) in shells {
+            // A question or permission prompt is reported to the user instead.
+            if awaiting_input.contains(&id) {
+                continue;
+            }
+            if let Some(turn) = pending.iter_mut().find(|turn| turn.id == id) {
+                for command in commands {
+                    if !turn.stopped_shells.contains(&command) {
+                        turn.stopped_shells.push(command);
+                    }
+                }
+                continue;
+            }
+            let session = self
+                .request_json(
+                    record,
+                    "GET",
+                    &format!("/session/{}", url_path_segment(&id)),
+                    None,
+                )
+                .unwrap_or(Value::Null);
+            // A subagent's shell is its parent's business; the parent is
+            // resumed or woken on its own.
+            if session.get("parentID").and_then(Value::as_str).is_some() {
+                continue;
+            }
+            let cwd = session
+                .pointer("/location/directory")
+                .and_then(Value::as_str)
+                .map_or(cwd, PathBuf::from);
+            let mut turn = InterruptedTurn {
+                id,
+                cwd,
+                agent: None,
+                provider_id: None,
+                model_id: None,
+                variant: None,
+                stopped_shells: commands,
+            };
+            v2_turn_settings(&mut turn, &session);
+            pending.push(turn);
+        }
+        Ok(())
+    }
+
     fn interrupted_turns(
         &self,
         record: &ServerRecord,
@@ -1691,6 +1786,11 @@ struct InterruptedTurn {
     model_id: Option<String>,
     #[serde(default)]
     variant: Option<String>,
+    /// Background shells the session was waiting on that stopping the server
+    /// killed. Their exit notification will never come, so the resume says
+    /// which ones to start again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    stopped_shells: Vec<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -1774,11 +1874,28 @@ fn interrupted_turn(id: String, cwd: PathBuf, messages: &Value) -> InterruptedTu
         variant: text("/model/variant").or_else(|| text("/variant")),
         id,
         cwd,
+        stopped_shells: Vec::new(),
     }
 }
 
 fn resume_prompt_body(turn: &InterruptedTurn) -> Value {
-    let mut body = json!({"parts": [{"type": "text", "text": RESUME_PROMPT}]});
+    let text = if turn.stopped_shells.is_empty() {
+        RESUME_PROMPT.to_owned()
+    } else {
+        let shells = turn
+            .stopped_shells
+            .iter()
+            .map(|command| format!("- `{command}`"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "{RESUME_PROMPT}\n\nThe OpenCode server restarted and stopped these background \
+             shells you started, so you will not be notified when they finish:\n{shells}\n\n\
+             Start again any you still need (as background shells) and carry on. If none \
+             matter any more, end your turn without doing anything."
+        )
+    };
+    let mut body = json!({"parts": [{"type": "text", "text": text}]});
     if let Some(agent) = &turn.agent {
         body["agent"] = json!(agent);
     }

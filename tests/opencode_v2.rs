@@ -95,9 +95,56 @@ fn real_v2_lifecycle_without_provider_credentials() {
         .reply(&session.id, "second isolated input")
         .unwrap();
     reconnect.interrupt(&session.id).unwrap();
+    // A native background shell the idle session waits on dies with the
+    // server; the restart must tell the session which one to start again.
+    let record: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(directory.path().join("supervisor/server.json")).unwrap(),
+    )
+    .unwrap();
+    let created = std::process::Command::new("curl")
+        .args(["-sf", "-u"])
+        .arg(format!(
+            "{}:{}",
+            record["username"].as_str().unwrap(),
+            record["password"].as_str().unwrap()
+        ))
+        .args(["-H", "content-type: application/json", "-d"])
+        .arg(
+            serde_json::json!({
+                "command": "sleep 300; echo restart-shell-probe",
+                "metadata": {"sessionID": session.id},
+            })
+            .to_string(),
+        )
+        .arg(format!(
+            "http://127.0.0.1:{}/api/shell?location%5Bdirectory%5D={}",
+            record["port"],
+            directory.path().display()
+        ))
+        .output()
+        .unwrap();
+    assert!(created.status.success(), "shell.create failed: {created:?}");
     let old_pid = reconnect.live_server_pid().unwrap().unwrap();
     let restarted = reconnect.restart_server().unwrap();
     assert_eq!(restarted.previous_pid, Some(old_pid));
+    assert!(
+        restarted.resumed.contains(&session.id),
+        "the session waiting on a shell was not woken: {restarted:?}"
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let transcript = reconnect.inspect(&session.id).unwrap();
+        if transcript.contains("stopped these background shells")
+            && transcript.contains("sleep 300; echo restart-shell-probe")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the resume did not name the stopped shell:\n{transcript}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     assert_ne!(reconnect.live_server_pid().unwrap(), Some(old_pid));
     assert!(reconnect.is_v2().unwrap());
     assert_eq!(reconnect.list().unwrap()[0].id, session.id);
