@@ -1,7 +1,8 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, SyncSender, TryRecvError, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -218,6 +219,9 @@ pub fn run_dashboard(
     let worker_hidden_sessions = hidden_sessions.clone();
     let worker_session_aliases = session_aliases.clone();
     let turn_classifier = crate::turn_classifier::TurnClassifier::from_env(control);
+    let turn_labels = turn_classifier
+        .clone()
+        .map(|classifier| move || classifier.labelled());
     let _refresh_worker = thread::spawn(move || {
         let mut first_refresh = true;
         while let Ok(worker_request) = refresh_rx.recv() {
@@ -354,6 +358,11 @@ pub fn run_dashboard(
     let mut next_screen_status = Instant::now();
     let mut screen_working = std::collections::BTreeSet::<String>::new();
     let mut refresh_after_screen_idle: Option<Instant> = None;
+    let running_poll = control
+        .provider_io_enabled()
+        .then(|| RunningPoll::spawn(control.clone()));
+    let mut running_sessions = BTreeMap::<Provider, BTreeSet<String>>::new();
+    let mut classifier_labels = turn_labels.as_ref().map_or(0, |labels| labels());
     let mut needs_draw = true;
     let mut input_burst = InputBurst::default();
     let mut event_reader = MetaArrowReader::default();
@@ -403,6 +412,9 @@ pub fn run_dashboard(
                         });
                     }
                     crate::adapters::apply_background_screens(&mut snapshot);
+                    // A refresh that read a session just before its turn
+                    // started must not put the row back to idle.
+                    crate::adapters::apply_running_sessions(&mut snapshot, &running_sessions);
                     let changed = snapshot != app.snapshot;
                     app.replace_snapshot(snapshot);
                     if let Some(session_id) = resolve_pending_reveal(
@@ -753,6 +765,23 @@ pub fn run_dashboard(
             }
             screen_working = working;
             next_screen_status = Instant::now() + SCREEN_STATUS_INTERVAL;
+        }
+        if let Some(running) = running_poll.as_ref().and_then(RunningPoll::take) {
+            needs_draw |= app.update_snapshot(|snapshot| {
+                crate::adapters::apply_running_sessions(snapshot, &running)
+            });
+            if running_changes_need_refresh(&running_sessions, &running, &app.snapshot) {
+                refresh_after_screen_idle = Some(Instant::now());
+            }
+            running_sessions = running;
+        }
+        // A turn's needs-input verdict lands after the refresh that found the
+        // turn idle; show it now rather than at the next periodic refresh.
+        if let Some(labels) = turn_labels.as_ref().map(|labels| labels()) {
+            if labels != classifier_labels {
+                classifier_labels = labels;
+                refresh_after_screen_idle.get_or_insert_with(Instant::now);
+            }
         }
         if let Some(scheme) = scheme_watcher.as_ref().and_then(SchemeWatcher::take_change) {
             if app.color_scheme != scheme {
@@ -1277,6 +1306,69 @@ fn discovery_request_for_pending_launch(
         request.include_interactive = true;
     }
     request
+}
+
+/// How often the dashboard asks providers which turns run now. A full refresh
+/// runs every 15 s, so without this a reply showed as idle for up to that
+/// long, and a short turn could start and end unseen.
+const RUNNING_POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+type RunningSessions = BTreeMap<Provider, BTreeSet<String>>;
+
+/// Polls the providers that report running turns in one cheap request, off
+/// the UI thread. Stops once the dashboard drops it.
+struct RunningPoll {
+    latest: Arc<Mutex<Option<RunningSessions>>>,
+}
+
+impl RunningPoll {
+    fn spawn(control: ControlHub) -> Self {
+        let latest = Arc::new(Mutex::new(None));
+        let slot = Arc::downgrade(&latest);
+        let _ = thread::Builder::new()
+            .name("running-poll".into())
+            .spawn(move || loop {
+                let running = control.running_sessions();
+                let Some(slot) = slot.upgrade() else {
+                    return;
+                };
+                if let Ok(mut latest) = slot.lock() {
+                    *latest = Some(running);
+                }
+                drop(slot);
+                thread::sleep(RUNNING_POLL_INTERVAL);
+            });
+        Self { latest }
+    }
+
+    fn take(&self) -> Option<RunningSessions> {
+        self.latest.lock().ok()?.take()
+    }
+}
+
+/// Whether a change in running turns needs a refresh: a turn ended, which
+/// only discovery can classify, or one started in a session the dashboard
+/// does not list yet.
+fn running_changes_need_refresh(
+    before: &RunningSessions,
+    after: &RunningSessions,
+    snapshot: &SessionSnapshot,
+) -> bool {
+    let contains = |sessions: &RunningSessions, provider: &Provider, id: &String| {
+        sessions.get(provider).is_some_and(|ids| ids.contains(id))
+    };
+    let ended = before
+        .iter()
+        .any(|(provider, ids)| ids.iter().any(|id| !contains(after, provider, id)));
+    let unlisted = after.iter().any(|(provider, ids)| {
+        ids.iter().any(|id| {
+            !contains(before, provider, id)
+                && !snapshot.sessions.iter().any(|session| {
+                    session.provider == *provider && session.provider_session_id == *id
+                })
+        })
+    });
+    ended || unlisted
 }
 
 fn schedule_refresh(
@@ -3032,6 +3124,43 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("failed to save pause"));
+    }
+
+    #[test]
+    fn a_turn_ending_or_starting_off_the_list_asks_for_a_refresh() {
+        let snapshot = app().snapshot;
+        let running = |ids: &[&str]| {
+            BTreeMap::from([(
+                Provider::Claude,
+                ids.iter().map(|id| id.to_string()).collect::<BTreeSet<_>>(),
+            )])
+        };
+        // A listed session starting is shown by the poll itself.
+        assert!(!running_changes_need_refresh(
+            &running(&[]),
+            &running(&["worker"]),
+            &snapshot
+        ));
+        assert!(!running_changes_need_refresh(
+            &running(&["worker"]),
+            &running(&["worker"]),
+            &snapshot
+        ));
+        assert!(running_changes_need_refresh(
+            &running(&["worker"]),
+            &running(&[]),
+            &snapshot
+        ));
+        assert!(running_changes_need_refresh(
+            &running(&["worker"]),
+            &RunningSessions::new(),
+            &snapshot
+        ));
+        assert!(running_changes_need_refresh(
+            &running(&[]),
+            &running(&["new"]),
+            &snapshot
+        ));
     }
 
     #[test]

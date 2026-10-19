@@ -296,6 +296,13 @@ impl ProviderController for OpenCodeController {
         }
     }
 
+    fn running_sessions(&self) -> Result<Option<BTreeSet<String>>> {
+        match &self.supervisor {
+            Some(supervisor) => supervisor.running_sessions(),
+            None => Ok(None),
+        }
+    }
+
     fn launch(&self, request: &LaunchRequest) -> Result<ControlOutcome> {
         if request.provider != Provider::OpenCode {
             bail!("the OpenCode controller cannot launch another provider");
@@ -1932,7 +1939,7 @@ fn agent_session_from_managed(managed: &ManagedOpenCodeSession) -> AgentSession 
         cwd: managed.cwd.clone(),
         state: managed.state,
         summary: managed.summary.clone(),
-        raw_state: Some("managed_server".into()),
+        raw_state: Some(managed.raw_state.into()),
         pid: Some(managed.server_pid),
         started_at: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(managed.created_at_ms)),
         updated_at: Some(SystemTime::UNIX_EPOCH + Duration::from_millis(managed.updated_at_ms)),
@@ -1947,7 +1954,7 @@ fn overlay_managed(session: &mut AgentSession, managed: &ManagedOpenCodeSession)
     session.cwd = managed.cwd.clone();
     session.state = managed.state;
     session.summary = managed.summary.clone();
-    session.raw_state = Some("managed_server".into());
+    session.raw_state = Some(managed.raw_state.into());
     session.pid = Some(managed.server_pid);
     session.started_at =
         Some(SystemTime::UNIX_EPOCH + Duration::from_millis(managed.created_at_ms));

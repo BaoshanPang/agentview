@@ -85,6 +85,8 @@ struct OwnedSession {
     updated_at_ms: u64,
 }
 
+pub const MANAGED_RAW_STATE: &str = "managed_server";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ManagedOpenCodeSession {
     pub id: String,
@@ -92,6 +94,9 @@ pub struct ManagedOpenCodeSession {
     pub title: String,
     pub summary: String,
     pub state: SessionState,
+    /// Why the session is in `state`, when the server says more than its
+    /// status: a pending question or permission, or a failed turn.
+    pub raw_state: &'static str,
     pub server_pid: u32,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -377,10 +382,14 @@ impl OpenCodeSupervisor {
                 record = current;
             }
         }
-        let mut blocked = BTreeSet::new();
+        let mut questions = BTreeSet::new();
+        let mut permissions = BTreeSet::new();
         if record.api == ApiVersion::V2 && !record.sessions.is_empty() {
             for directory in statuses_by_directory.keys() {
-                for route in ["/question", "/permission"] {
+                for (route, blocked) in [
+                    ("/question", &mut questions),
+                    ("/permission", &mut permissions),
+                ] {
                     blocked.extend(request_session_ids(&self.request_json(
                         &record,
                         "GET",
@@ -396,6 +405,7 @@ impl OpenCodeSupervisor {
             .filter_map(|owned| {
                 let statuses = statuses_by_directory.get(&owned.cwd)?;
                 let mut state = state_from_statuses(statuses, &owned.id);
+                let mut raw_state = MANAGED_RAW_STATE;
                 if record.api == ApiVersion::V2 {
                     let session = sessions_by_directory
                         .get(&owned.cwd)?
@@ -408,13 +418,17 @@ impl OpenCodeSupervisor {
                     {
                         return None;
                     }
-                    if blocked.contains(&owned.id)
-                        || (state == SessionState::Completed && session["outcome"] == "failed")
-                    {
-                        state = SessionState::NeedsInput;
+                    if permissions.contains(&owned.id) {
+                        (state, raw_state) = (SessionState::NeedsInput, "permission requested");
+                    } else if questions.contains(&owned.id) {
+                        (state, raw_state) = (SessionState::NeedsInput, "question asked");
+                    } else if state == SessionState::Completed && session["outcome"] == "failed" {
+                        (state, raw_state) = (SessionState::NeedsInput, "turn failed");
                     }
                 }
-                Some(self.snapshot_with_state(&record, owned, state))
+                let mut snapshot = self.snapshot_with_state(&record, owned, state);
+                snapshot.raw_state = raw_state;
+                Some(snapshot)
             })
             .collect())
     }
@@ -691,6 +705,21 @@ impl OpenCodeSupervisor {
             "/tui/execute-command",
             Some(&json!({"command":command,"client":client})),
         )
+    }
+
+    /// Every session the live server is running a turn for, in one request,
+    /// so the dashboard can show a turn the moment it starts instead of at
+    /// its next full refresh. `None` without a live server, or for a V1
+    /// server, which only answers per directory. Never starts a server.
+    pub fn running_sessions(&self) -> Result<Option<BTreeSet<String>>> {
+        let Some(record) = self.live_record()? else {
+            return Ok(None);
+        };
+        if record.api != ApiVersion::V2 {
+            return Ok(None);
+        }
+        let statuses = self.request_json(&record, "GET", "/session/status", None)?;
+        Ok(Some(running_session_ids(&statuses).into_iter().collect()))
     }
 
     /// Turns the live server is running in `directories`, for sessions this
@@ -1384,6 +1413,7 @@ impl OpenCodeSupervisor {
             title: owned.title.clone(),
             summary: owned.summary.clone(),
             state,
+            raw_state: MANAGED_RAW_STATE,
             server_pid: record.pid,
             created_at_ms: owned.created_at_ms,
             updated_at_ms: owned.updated_at_ms,

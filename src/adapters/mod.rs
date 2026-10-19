@@ -282,6 +282,39 @@ pub fn apply_background_screens(snapshot: &mut SessionSnapshot) -> bool {
     apply_screen_states(snapshot, background_screen_state)
 }
 
+/// Mark host rows whose provider reports a turn running now as working, and
+/// return whether any row changed. This only starts work: a turn that ended
+/// is left to the next refresh, which knows whether it ended on a question,
+/// a hold, or a finished answer. A pending permission or question keeps its
+/// row, since the server reports a turn that waits on one as running too.
+pub fn apply_running_sessions(
+    snapshot: &mut SessionSnapshot,
+    running: &BTreeMap<Provider, BTreeSet<String>>,
+) -> bool {
+    let mut changed = false;
+    for session in &mut snapshot.sessions {
+        if session.runtime != Runtime::Host
+            || session.state == SessionState::Working
+            || matches!(
+                session.raw_state.as_deref(),
+                Some("permission requested" | "question asked")
+            )
+            || !running
+                .get(&session.provider)
+                .is_some_and(|ids| ids.contains(&session.provider_session_id))
+        {
+            continue;
+        }
+        session.state = SessionState::Working;
+        session.raw_state = Some("server busy".into());
+        changed = true;
+    }
+    if changed {
+        snapshot.sort_for_display();
+    }
+    changed
+}
+
 /// Host rows whose held screen shows a running turn now. A row that leaves
 /// this set has just finished or stopped on the user, which discovery
 /// would otherwise only report on its next pass.
@@ -895,6 +928,61 @@ mod tests {
         assert_eq!(order, sorted);
 
         assert!(!apply_screen_states(&mut snapshot, working));
+    }
+
+    #[test]
+    fn a_turn_the_server_runs_shows_as_working_unless_it_waits_on_the_user() {
+        let session = |id: &str, state, raw_state: &str| AgentSession {
+            id: format!("opencode:host:{id}"),
+            provider_session_id: id.into(),
+            provider: Provider::OpenCode,
+            runtime: Runtime::Host,
+            kind: SessionKind::Managed,
+            name: id.into(),
+            cwd: PathBuf::from("/workspace"),
+            state,
+            summary: String::new(),
+            raw_state: Some(raw_state.into()),
+            pid: Some(1),
+            started_at: None,
+            updated_at: None,
+            pull_requests: None,
+            capabilities: BTreeSet::new(),
+        };
+        let mut snapshot = SessionSnapshot {
+            sessions: vec![
+                // The classifier labelled the previous turn as needing input.
+                session("replied", SessionState::NeedsInput, "managed_server"),
+                session("done", SessionState::Completed, "managed_server"),
+                session("asked", SessionState::NeedsInput, "question asked"),
+                session("approval", SessionState::NeedsInput, "permission requested"),
+                session("idle", SessionState::NeedsInput, "managed_server"),
+            ],
+            ..SessionSnapshot::default()
+        };
+        let running = BTreeMap::from([(
+            Provider::OpenCode,
+            BTreeSet::from(["replied", "done", "asked", "approval"].map(String::from)),
+        )]);
+
+        assert!(apply_running_sessions(&mut snapshot, &running));
+        let state = |id: &str| {
+            snapshot
+                .sessions
+                .iter()
+                .find(|s| s.provider_session_id == id)
+                .unwrap()
+                .state
+        };
+        assert_eq!(state("replied"), SessionState::Working);
+        assert_eq!(state("done"), SessionState::Working);
+        assert_eq!(state("asked"), SessionState::NeedsInput);
+        assert_eq!(state("approval"), SessionState::NeedsInput);
+        assert_eq!(state("idle"), SessionState::NeedsInput);
+        assert!(!apply_running_sessions(&mut snapshot, &running));
+        // Another provider's IDs never match an OpenCode row.
+        let other = BTreeMap::from([(Provider::Codex, BTreeSet::from(["idle".to_owned()]))]);
+        assert!(!apply_running_sessions(&mut snapshot, &other));
     }
 
     #[test]

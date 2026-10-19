@@ -179,6 +179,13 @@ pub trait ProviderController: Send + Sync {
 
     fn enrich(&self, _snapshot: &mut SessionSnapshot) {}
 
+    /// Provider session IDs with a turn running now, when the provider can
+    /// say so in one cheap request, so the dashboard can poll it between
+    /// full refreshes. `None` when it cannot.
+    fn running_sessions(&self) -> Result<Option<BTreeSet<String>>> {
+        Ok(None)
+    }
+
     fn launch(&self, _request: &LaunchRequest) -> Result<ControlOutcome> {
         bail!("{} launch is unavailable", self.provider().label())
     }
@@ -376,6 +383,18 @@ impl ControlHub {
         for controller in self.controllers.values() {
             controller.enrich(snapshot);
         }
+    }
+
+    /// Running sessions of every provider that can report them cheaply. A
+    /// provider whose request failed is left out rather than reported idle.
+    pub fn running_sessions(&self) -> BTreeMap<Provider, BTreeSet<String>> {
+        self.controllers
+            .iter()
+            .filter_map(|(provider, controller)| {
+                let running = controller.running_sessions().ok()??;
+                Some((provider.clone(), running))
+            })
+            .collect()
     }
 
     /// Remove host Claude sessions not recorded by agentview's launch registry.

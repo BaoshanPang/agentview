@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
@@ -51,6 +52,7 @@ pub struct TurnClassifier {
     ask: Arc<Ask>,
     cache: Arc<Mutex<Cache>>,
     store: Option<Arc<PathBuf>>,
+    labelled: Arc<AtomicU64>,
 }
 
 #[derive(Default)]
@@ -80,6 +82,7 @@ impl TurnClassifier {
             ask: Arc::new(ask),
             cache: Arc::new(Mutex::new(Cache::default())),
             store: None,
+            labelled: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -114,6 +117,12 @@ impl TurnClassifier {
             Some(path) => classifier.with_store(path),
             None => classifier,
         })
+    }
+
+    /// How many turns have been labelled so far, so the dashboard can show a
+    /// new verdict without waiting for its next periodic refresh.
+    pub fn labelled(&self) -> u64 {
+        self.labelled.load(Ordering::Relaxed)
     }
 
     /// Apply cached verdicts to idle sessions and start labelling new turns in
@@ -177,6 +186,7 @@ impl TurnClassifier {
                         cache.failed.remove(&session.id);
                         cache.last_error = None;
                         cache.verdicts.insert(session.id, labelled);
+                        classifier.labelled.fetch_add(1, Ordering::Relaxed);
                     }
                     Err(error) => {
                         cache.last_error = Some(format!("{error:#}"));
