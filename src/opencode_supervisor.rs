@@ -722,6 +722,47 @@ impl OpenCodeSupervisor {
         Ok(Some(running_session_ids(&statuses).into_iter().collect()))
     }
 
+    /// Shell commands the live server is still running in `directories`, by
+    /// the session that started them, so a session whose turn ended on a
+    /// native background shell shows as working until the shell's
+    /// notification wakes it. Empty without a live server, or for a V1
+    /// server, which has no shell registry. Never starts a server.
+    pub fn running_shells(
+        &self,
+        directories: &BTreeSet<PathBuf>,
+    ) -> Result<BTreeMap<String, String>> {
+        let mut shells = BTreeMap::new();
+        let Some(record) = self.live_record()? else {
+            return Ok(shells);
+        };
+        if record.api != ApiVersion::V2 {
+            return Ok(shells);
+        }
+        for directory in directories {
+            let listed = self.request_json(
+                &record,
+                "GET",
+                &with_directory_query("/shell", directory),
+                None,
+            )?;
+            for shell in listed.as_array().into_iter().flatten() {
+                if shell["status"] != "running" {
+                    continue;
+                }
+                let (Some(session), Some(command)) = (
+                    shell.pointer("/metadata/sessionID").and_then(Value::as_str),
+                    shell["command"].as_str(),
+                ) else {
+                    continue;
+                };
+                shells
+                    .entry(session.to_owned())
+                    .or_insert_with(|| command.to_owned());
+            }
+        }
+        Ok(shells)
+    }
+
     /// Turns the live server is running in `directories`, for sessions this
     /// dashboard did not start but opened in its shared TUI: no `opencode`
     /// process of their own holds them, so only the server knows they run.
@@ -2036,7 +2077,7 @@ fn v2_request(path: &str, body: Option<&Value>) -> Result<(String, Option<Value>
     let mut queries = other.into_iter().map(str::to_owned).collect::<Vec<_>>();
     if matches!(
         route.as_str(),
-        "/api/model" | "/api/provider" | "/api/form" | "/api/permission/request"
+        "/api/model" | "/api/provider" | "/api/form" | "/api/permission/request" | "/api/shell"
     ) {
         if let Some(directory) = directory {
             queries.push(format!("location%5Bdirectory%5D={directory}"));
@@ -3400,6 +3441,12 @@ mod tests {
                 .unwrap()
                 .0,
             "/api/permission/request?location%5Bdirectory%5D=%2Fwork%2Fother"
+        );
+        assert_eq!(
+            super::v2_request("/shell?directory=%2Fwork%2Fother", None)
+                .unwrap()
+                .0,
+            "/api/shell?location%5Bdirectory%5D=%2Fwork%2Fother"
         );
         assert_eq!(
             body.unwrap(),

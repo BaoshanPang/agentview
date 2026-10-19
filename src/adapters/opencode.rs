@@ -286,6 +286,28 @@ impl ProviderController for OpenCodeController {
                 session.provider == Provider::OpenCode && session.runtime == Runtime::Host
             }),
         );
+        let idle = |session: &AgentSession| {
+            session.provider == Provider::OpenCode
+                && session.runtime == Runtime::Host
+                && session.state != SessionState::Working
+        };
+        let directories = snapshot
+            .sessions
+            .iter()
+            .filter(|session| idle(session))
+            .map(|session| session.cwd.clone())
+            .collect::<BTreeSet<_>>();
+        if !directories.is_empty() {
+            match supervisor.running_shells(&directories) {
+                Ok(shells) => apply_native_shells(
+                    snapshot.sessions.iter_mut().filter(|session| idle(session)),
+                    &shells,
+                ),
+                Err(error) => snapshot
+                    .warnings
+                    .push(format!("OpenCode background shells: {error:#}")),
+            }
+        }
         if let Some(shells) = &self.source.background_shells {
             apply_background_shells(
                 snapshot.sessions.iter_mut().filter(|session| {
@@ -1846,6 +1868,22 @@ fn apply_background_shells<'a>(
     }
 }
 
+/// A shell the session left running with V2's native `background` option. Its
+/// exit notification starts the session's next turn, so the session is still
+/// at work. Only idle rows are passed in: a running turn's own foreground
+/// shell is listed too.
+fn apply_native_shells<'a>(
+    sessions: impl Iterator<Item = &'a mut AgentSession>,
+    shells: &BTreeMap<String, String>,
+) {
+    for session in sessions {
+        if let Some(command) = shells.get(&session.provider_session_id) {
+            let command: String = command.chars().take(60).collect();
+            apply_hold(session, &format!("shell: {command}"));
+        }
+    }
+}
+
 /// A plugin's background work, such as a CI monitor that will start the next
 /// turn, keeps an idle or closed session working. A question or permission
 /// prompt still needs the user first.
@@ -2146,6 +2184,45 @@ fn is_throwaway_directory(directory: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_native_background_shell_keeps_its_idle_session_working() {
+        let managed = |id: &str, state| ManagedOpenCodeSession {
+            id: id.into(),
+            cwd: PathBuf::from("/work"),
+            title: id.into(),
+            summary: String::new(),
+            state,
+            raw_state: crate::opencode_supervisor::MANAGED_RAW_STATE,
+            server_pid: 1,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        };
+        let mut sessions = vec![
+            agent_session_from_managed(&managed("ses_watching", SessionState::Completed)),
+            agent_session_from_managed(&managed("ses_idle", SessionState::Completed)),
+            agent_session_from_managed(&managed("ses_asked", SessionState::NeedsInput)),
+        ];
+        sessions[2].raw_state = Some("question asked".into());
+        let shells = BTreeMap::from([
+            (
+                "ses_watching".to_owned(),
+                "until gh run view 1 | grep -q completed; do sleep 30; done".to_owned(),
+            ),
+            ("ses_asked".to_owned(), "sleep 600".to_owned()),
+        ]);
+
+        apply_native_shells(sessions.iter_mut(), &shells);
+
+        assert_eq!(sessions[0].state, SessionState::Working);
+        assert_eq!(
+            sessions[0].raw_state.as_deref(),
+            Some("background: shell: until gh run view 1 | grep -q completed; do sleep 30; done")
+        );
+        assert_eq!(sessions[1].state, SessionState::Completed);
+        // A question still needs the user first.
+        assert_eq!(sessions[2].state, SessionState::NeedsInput);
+    }
+
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
