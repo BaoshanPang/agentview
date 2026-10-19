@@ -66,7 +66,16 @@ pub fn use_default_file() {
             None => return,
         },
     };
-    if std::fs::create_dir_all(&dir).is_ok() {
+    // The state directory's other stores refuse one that is not private, and
+    // this can be the first thing to create it.
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    if builder.create(&dir).is_ok() {
         let _ = DEFAULT_PATH.set(dir.join("perf.log"));
     }
 }
