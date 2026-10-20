@@ -50,10 +50,15 @@ pub struct MigrationOutcome {
     pub warnings: Vec<String>,
 }
 
+/// Moves a session to another folder in place, keeping its ID. Returns
+/// `Ok(false)` when the harness cannot, so the move falls back to a copy.
+pub type NativeMove = Arc<dyn Fn(&str, &Path) -> Result<bool> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct MigrationClient {
     executable: String,
     source_clis: BTreeMap<Provider, String>,
+    native_moves: BTreeMap<Provider, NativeMove>,
     runner: Arc<dyn CommandRunner>,
 }
 
@@ -69,6 +74,7 @@ impl MigrationClient {
                 (Provider::OpenCode, "opencode".into()),
                 (Provider::KiloCode, "kilo".into()),
             ]),
+            native_moves: BTreeMap::new(),
             runner,
         }
     }
@@ -77,6 +83,11 @@ impl MigrationClient {
         if matches!(provider, Provider::OpenCode | Provider::KiloCode) {
             self.source_clis.insert(provider, executable.into());
         }
+        self
+    }
+
+    pub fn with_native_move(mut self, provider: Provider, mover: NativeMove) -> Self {
+        self.native_moves.insert(provider, mover);
         self
     }
 
@@ -90,6 +101,18 @@ impl MigrationClient {
         }
         validate_text(&request.source.provider_session_id, "source session ID")?;
         validate_name(&request.name)?;
+        if request.is_move() && request.source.runtime == Runtime::Host {
+            if let Some(mover) = self.native_moves.get(&request.source.provider) {
+                if mover(&request.source.provider_session_id, &request.cwd)? {
+                    let session_id = request.source.provider_session_id.clone();
+                    return Ok(MigrationOutcome {
+                        normalized_id: normalized_session_id(&request.target, &session_id)?,
+                        session_id,
+                        warnings: Vec::new(),
+                    });
+                }
+            }
+        }
         if request.is_move() && request.target == Provider::OpenCode {
             return self.move_opencode(request);
         }
@@ -1055,6 +1078,57 @@ mod tests {
         assert!(args
             .windows(2)
             .any(|pair| pair == ["--source-cwd", "/work/project"]));
+    }
+
+    #[test]
+    fn native_move_keeps_the_session_id_and_skips_session_migrate() {
+        let runner = Arc::new(FakeRunner::default());
+        let moved = Arc::new(Mutex::new(Vec::new()));
+        let seen = moved.clone();
+        let outcome = MigrationClient::with_runner("session-migrate", runner.clone())
+            .with_native_move(
+                Provider::OpenCode,
+                Arc::new(move |id, cwd| {
+                    seen.lock().unwrap().push((id.to_owned(), cwd.to_owned()));
+                    Ok(true)
+                }),
+            )
+            .migrate(&MigrationRequest {
+                source: source(Provider::OpenCode),
+                target: Provider::OpenCode,
+                name: "source".into(),
+                cwd: "/work/other".into(),
+            })
+            .unwrap();
+        assert_eq!(outcome.session_id, "source-id");
+        assert_eq!(outcome.normalized_id, "opencode:host:source-id");
+        assert_eq!(
+            *moved.lock().unwrap(),
+            [("source-id".to_owned(), PathBuf::from("/work/other"))]
+        );
+        assert!(runner.requests.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn opencode_v1_move_falls_back_to_export_and_import() {
+        let runner = Arc::new(NativeMoveRunner {
+            requests: Mutex::new(Vec::new()),
+            moved: true,
+        });
+        let mut session = source(Provider::OpenCode);
+        session.provider_session_id = "ses_source".into();
+        let outcome = MigrationClient::with_runner("missing-session-migrate", runner.clone())
+            .with_source_cli(Provider::OpenCode, "opencode-dev")
+            .with_native_move(Provider::OpenCode, Arc::new(|_, _| Ok(false)))
+            .migrate(&MigrationRequest {
+                source: session,
+                target: Provider::OpenCode,
+                name: "evidence".into(),
+                cwd: PathBuf::from("/work/arca"),
+            })
+            .unwrap();
+        assert_eq!(outcome.session_id, "ses_source");
+        assert_eq!(runner.requests.lock().unwrap().len(), 3);
     }
 
     #[test]

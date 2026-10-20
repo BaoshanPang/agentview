@@ -541,6 +541,33 @@ impl OpenCodeSupervisor {
         save_record(&self.record_path, &record)
     }
 
+    /// Move a session to another directory in place on a V2 server, keeping
+    /// its ID and transcript. Returns false on a V1 server, which has no
+    /// native move, so the caller can fall back to copying the session.
+    pub fn move_session(&self, session_id: &str, directory: &Path) -> Result<bool> {
+        let _lock = StateLock::acquire(&self.lock_path)?;
+        let mut record = self.required_live_record_locked()?;
+        if record.api != ApiVersion::V2 {
+            return Ok(false);
+        }
+        let directory = directory
+            .to_str()
+            .context("the destination directory is not valid UTF-8")?;
+        let response = request_http(
+            &record,
+            "POST",
+            &format!("/api/session/{}/move", url_path_segment(session_id)),
+            Some(&json!({"directory": directory, "delivery": "queue"})),
+        )?;
+        ensure_http_success(&response)?;
+        if let Some(session) = record.sessions.get_mut(session_id) {
+            session.cwd = PathBuf::from(directory);
+            session.updated_at_ms = now_millis();
+            save_record(&self.record_path, &record)?;
+        }
+        Ok(true)
+    }
+
     pub fn interrupt(&self, session_id: &str) -> Result<()> {
         let record = self.required_live_record()?;
         let owned = require_owned(&record, session_id)?;

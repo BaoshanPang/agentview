@@ -652,6 +652,14 @@ fn main() -> Result<()> {
     let opencode_supervisor = opencode_enabled
         .then(|| OpenCodeSupervisor::host(cli.opencode_bin.clone()).map(Arc::new))
         .transpose()?;
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let migration_client = match opencode_supervisor.clone() {
+        Some(supervisor) => migration_client.with_native_move(
+            Provider::OpenCode,
+            Arc::new(move |id, cwd| supervisor.move_session(id, cwd)),
+        ),
+        None => migration_client,
+    };
     #[cfg(not(target_os = "linux"))]
     let opencode_ownership = opencode_enabled
         .then(OpenCodeOwnership::load_default)
