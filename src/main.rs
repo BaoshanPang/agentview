@@ -165,8 +165,8 @@ enum OpenCodeCommand {
     HandoffImport { manifest: PathBuf },
     /// Admit one retry-safe continuation per explicitly selected manifest root.
     HandoffResume { handoff_id: String },
-    /// Restart the server on the same port and send `continue` to every
-    /// session whose turn the restart interrupted.
+    /// Restart on the same port and resume interrupted work. Managed V2 uses
+    /// native recovery rather than injecting another `continue`.
     Restart,
     /// Stop the server and remember the turns it cut off; the next server
     /// start sends them `continue`. A reboot is detected without this.
@@ -934,6 +934,7 @@ fn main() -> Result<()> {
             #[cfg(target_os = "linux")]
             let source = {
                 let supervisor = opencode_supervisor
+                    .clone()
                     .expect("OpenCode supervisor exists when OpenCode is enabled");
                 if request.include_external {
                     OpenCodeSource::managed(cli.opencode_bin, supervisor)
@@ -944,6 +945,7 @@ fn main() -> Result<()> {
             #[cfg(target_os = "macos")]
             let source = {
                 let supervisor = opencode_supervisor
+                    .clone()
                     .expect("OpenCode supervisor exists when OpenCode is enabled");
                 let ownership =
                     opencode_ownership.expect("OpenCode ownership exists when OpenCode is enabled");
@@ -1108,6 +1110,13 @@ fn main() -> Result<()> {
 
     if !io::stdout().is_terminal() || !io::stdin().is_terminal() {
         bail!("the dashboard requires a TTY; use --json for machine-readable output");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(supervisor) = &opencode_supervisor {
+        if let Err(error) = supervisor.recover_on_start() {
+            eprintln!("OpenCode startup recovery failed: {error:#}");
+        }
     }
 
     run_dashboard(

@@ -441,6 +441,10 @@ fn real_opencode_restart_resumes_a_turn_cut_off_mid_tool_call() {
 }
 
 fn write_fake_opencode(path: &Path) {
+    assert!(
+        std::env::var_os("AGENTVIEW_OPENCODE_SERVICE_FILE").is_none(),
+        "unset AGENTVIEW_OPENCODE_SERVICE_FILE before fake-server tests; never adopt a live host service"
+    );
     let db = rusqlite::Connection::open(path.parent().unwrap().join("opencode.db")).unwrap();
     db.execute_batch("CREATE TABLE IF NOT EXISTS session(id TEXT PRIMARY KEY,directory TEXT,parent_id TEXT,time_archived INTEGER,time_updated INTEGER);
         CREATE TABLE IF NOT EXISTS message(id TEXT PRIMARY KEY,session_id TEXT,time_created INTEGER,data TEXT);

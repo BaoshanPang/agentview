@@ -217,6 +217,18 @@ impl OpenCodeSupervisor {
         let _lock = StateLock::acquire(&self.lock_path)?;
         let previous = load_record(&self.record_path, &self.state_dir)?;
         if let Some(previous) = &previous {
+            // A crash or reboot can leave the registered service's dead PID
+            // on disk. Keep our existing authority for interactive startup to
+            // replace it; never try to adopt that stale process identity.
+            if previous.api == ApiVersion::V2
+                && (previous.pid == pid
+                    || (boot_time_ms().is_some_and(|booted| booted > previous.created_at_ms)
+                        && Some(previous.port) == url.port()
+                        && info["password"].as_str() == Some(previous.password.as_str())))
+                && !verify_server(previous)?
+            {
+                return Ok(());
+            }
             if verify_server(previous)? && previous.pid != pid {
                 bail!("isolated state already controls a different live OpenCode service");
             }
@@ -950,8 +962,33 @@ impl OpenCodeSupervisor {
         stop_server(&record, SHUTDOWN_GRACE, false)
     }
 
+    /// Interactive startup starts a recorded native service if it died. Its
+    /// durable execution claims own recovery; no transcript heuristic is needed.
+    pub fn recover_on_start(&self) -> Result<()> {
+        let _lock = StateLock::acquire(&self.lock_path)?;
+        let Some(record) = load_record(&self.record_path, &self.state_dir)? else {
+            return Ok(());
+        };
+        if record.api != ApiVersion::V2
+            || std::env::var_os("AGENTVIEW_OPENCODE_SERVICE_FILE").is_none()
+        {
+            return Ok(());
+        }
+        if !verify_server(&record)? {
+            self.ensure_server_locked()?;
+            return Ok(());
+        }
+        // A predecessor may have lost its acknowledgement after native boot
+        // resumed the claims. Clear that legacy journal without sending again.
+        let pending = load_pending_turns(&self.state_dir.join(RESTART_PENDING_FILE))?;
+        self.resume_turns(&record, pending, &mut OpenCodeRestartReport::default())?;
+        Ok(())
+    }
+
     /// Restart the owned server on the same port and credentials, then send
     /// `continue` to every top-level session whose turn the restart cut off.
+    /// Registered V2 services instead recover their durable execution claims
+    /// natively; an extra prompt would queue duplicate work.
     ///
     /// Attached native TUIs reconnect on their own because the endpoint does
     /// not change. Sessions blocked on a question or permission prompt are
@@ -1040,6 +1077,15 @@ impl OpenCodeSupervisor {
         let mut unresumed = Vec::new();
         for turn in pending {
             if record.api == ApiVersion::V2
+                && std::env::var_os("AGENTVIEW_OPENCODE_SERVICE_FILE").is_some()
+            {
+                // Managed V2 boot already resumes durable execution claims,
+                // including children and interrupted tools. Injecting another
+                // `continue` leaves a duplicate steer queued behind that turn.
+                report.resumed.push(turn.id);
+                continue;
+            }
+            if record.api == ApiVersion::V2
                 && self.handoff_protects_continuation(record, &turn.id)?
             {
                 // Migration inputs have their own durable admission IDs. A
@@ -1081,6 +1127,11 @@ impl OpenCodeSupervisor {
         report: &mut OpenCodeRestartReport,
     ) -> Result<Vec<InterruptedTurn>> {
         let mut pending = load_pending_turns(&self.state_dir.join(RESTART_PENDING_FILE))?;
+        if previous.is_some_and(|record| record.api == ApiVersion::V2)
+            && std::env::var_os("AGENTVIEW_OPENCODE_SERVICE_FILE").is_some()
+        {
+            return Ok(pending);
+        }
         let Some(previous) = previous else {
             return Ok(pending);
         };
@@ -1155,7 +1206,9 @@ impl OpenCodeSupervisor {
         pending: &mut Vec<InterruptedTurn>,
         awaiting_input: &[String],
     ) -> Result<()> {
-        if record.api != ApiVersion::V2 {
+        if record.api != ApiVersion::V2
+            || std::env::var_os("AGENTVIEW_OPENCODE_SERVICE_FILE").is_some()
+        {
             return Ok(());
         }
         let mut directories = record

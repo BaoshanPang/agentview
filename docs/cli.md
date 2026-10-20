@@ -388,14 +388,22 @@ resuming their parent restarts them. Sessions that were waiting on a question
 or permission prompt are listed rather than resumed, since that prompt does not
 survive the restart and only you can answer it. If the restart fails partway,
 running the command again resumes the sessions it recorded.
+For a registered V2 managed service, OpenCode itself resumes durable execution
+claims at boot and displays a restart notice. agentview does not inject an
+additional `continue`, which would queue duplicate work behind native recovery.
+Native recovery also owns interrupted tools, child execution, and background
+shell notices; idle owners of long-lived shells are not woken just for a restart.
 
-Rebooting needs no command. When the dashboard next starts the server and the
-machine has booted since the previous server started, agentview reads the
-OpenCode database for top-level sessions whose last reply began on that server
-and never completed, and resumes them the same way. A finished or interrupted
-reply always records its completion, and a server killed by shutdown never
-does. agentview only does this after a reboot: if the server merely crashed, a
-standalone OpenCode window could still be running one of those turns.
+After reboot, open agentview: interactive startup recovers unfinished turns
+without opening a session or typing `continue`. This is not a login item;
+agentview must be launched. Read-only `--json` discovery does not resume work.
+The recorded native service is started if it died, and native recovery resumes
+only its unfinished claims, including turns interrupted before their first
+response. Completed and deliberately interrupted turns stay stopped. The same
+managed-service recovery applies after a process crash, not just a reboot.
+Legacy/unregistered servers retain the older reboot-only database scan and
+explicit stop/restart continuation journal, since a standalone OpenCode window
+could still own other turns.
 
 To stop the server without restarting it:
 
