@@ -3072,7 +3072,7 @@ impl App {
     }
 
     fn submit_new_session(&mut self, input: String, pasted: PastedParts) -> AppAction {
-        if !input.starts_with('/') {
+        if !input.starts_with('/') || draft_starts_with_path(&input) {
             if self.launch_provider == Provider::Antigravity && self.launch_model.is_none() {
                 // Antigravity 1.1.x can terminate a task when its account does
                 // not advertise a default PlanModel/RequestedModel. Never send
@@ -3141,7 +3141,14 @@ impl App {
                     format!("session filter: {argument}")
                 });
             }
-            _ => self.set_notice(format!("unknown dashboard command {command}; use /help")),
+            _ => {
+                let notice = format!("unknown dashboard command {command}; use /help");
+                // Keep the draft so a mistyped command or pasted text is not lost.
+                self.set_input(input.clone());
+                self.pasted = pasted;
+                self.overlay = Overlay::Composer(ComposerMode::NewSession);
+                self.set_notice(notice);
+            }
         }
         AppAction::None
     }
@@ -3607,6 +3614,13 @@ fn directory_identity(path: &Path) -> Option<PathBuf> {
     path.canonicalize().ok().filter(|path| path.is_dir())
 }
 
+/// A draft whose first word is an absolute path, such as a dropped or pasted
+/// file (`/Users/m/shot.png fix this`), is a task, not a slash command.
+fn draft_starts_with_path(input: &str) -> bool {
+    let first = input.split(char::is_whitespace).next().unwrap_or_default();
+    first.len() > 1 && first[1..].contains('/')
+}
+
 fn expand_typed_directory(input: &str, home: Option<&Path>) -> Option<PathBuf> {
     if Path::new(input).is_absolute() {
         return Some(PathBuf::from(input));
@@ -3935,6 +3949,35 @@ mod tests {
         app.input = "/help".into();
         app.overlay = Overlay::Composer(ComposerMode::Filter);
         assert!(!app.draft_is_dashboard_command());
+    }
+
+    #[test]
+    fn a_draft_starting_with_a_dropped_file_path_launches() {
+        let mut app = App::new(SessionSnapshot::default());
+        app.start_new_session(None);
+        let draft = r"/Users/m/Gifs/CleanShot\ 2026-10-21\ at\ 10.40.06\ PM@2x.png fix this";
+        app.input = draft.into();
+        match app.submit_composer(ComposerMode::NewSession) {
+            AppAction::Launch { prompt, .. } => assert_eq!(prompt, draft),
+            other => panic!("expected a launch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unknown_command_keeps_the_draft() {
+        let mut app = App::new(SessionSnapshot::default());
+        app.start_new_session(None);
+        app.input = "/hlep me".into();
+        assert!(matches!(
+            app.submit_composer(ComposerMode::NewSession),
+            AppAction::None
+        ));
+        assert_eq!(app.input, "/hlep me");
+        assert_eq!(app.overlay, Overlay::Composer(ComposerMode::NewSession));
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.starts_with("unknown dashboard command")));
     }
 
     #[test]
