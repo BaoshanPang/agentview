@@ -11,6 +11,7 @@
 <link rel="icon" href="/favicon.svg">
 <style>
   :root {
+    color-scheme: light;
     --gray: #6e6e73;
     --ink: #1d1d1f;
     --rule: #d2d2d7;
@@ -18,16 +19,6 @@
     --bg: #fff;
     --code-bg: #f5f5f7;
     --accent: #506cf7;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --gray: #98989d;
-      --ink: #f5f5f7;
-      --rule: #3a3a3c;
-      --link: #9aaabd;
-      --bg: #111213;
-      --code-bg: #1c1c1e;
-    }
   }
   * { box-sizing: border-box; }
   body {
@@ -45,7 +36,7 @@
 
   header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 72px; }
   .brand { display: flex; align-items: center; gap: 10px; color: var(--ink); font-weight: 700; letter-spacing: -0.01em; font-size: 20px; }
-  .brand img { width: 26px; height: 26px; }
+  .brand img { width: 32px; height: 40px; }
   nav { display: flex; gap: 24px; font-size: 13px; }
 
   .label {
@@ -107,6 +98,7 @@
 
   .demo { margin: 64px 0 0; border: 1px solid var(--rule); border-radius: 10px; overflow: hidden; }
   .demo img { display: block; width: 100%; height: auto; }
+  .demo-caption { margin: 12px 0 0; color: var(--gray); font-size: 13px; }
 
   section { margin-top: 72px; }
   section > .label { padding-bottom: 10px; border-bottom: 1px solid var(--rule); margin-bottom: 0; }
@@ -177,8 +169,10 @@
   </div>
 
   <div class="demo">
-    <img src="/demo.gif" alt="agentview demo: inspecting a session, bringing a past session back with Ctrl+G, and starting a new task" width="1600" height="689">
+    <img src="/demo.gif" alt="agentview in light mode: usage limits, nested sub-sessions, searching past sessions by message text, and picking a model grouped by provider" width="1600" height="935">
   </div>
+
+  <p class="demo-caption">See usage limits, nested sessions, conversation search, and the model picker in action.</p>
 
   <section>
     <div class="label">Why</div>
@@ -190,7 +184,9 @@
     <div class="features">
       <div><b>Grouped by status</b>Waiting for input, working, completed. The harness is shown on every row.</div>
       <div><b>Jump in and back out</b>Open a native session while its work keeps running, then return to the list.</div>
-      <div><b>Bring back any past session</b><kbd>Ctrl+G</kbd> searches older sessions by name, harness, folder, or ID. No <code>cd</code> or <code>--resume</code>.</div>
+      <div><b>Find the conversation you remember</b><kbd>Ctrl+G</kbd> searches message text across Claude Code, Codex, and OpenCode, with matching snippets. Resume the exact session, even if it no longer appears in your recent history.</div>
+      <div><b>See subscription usage at a glance</b>Claude and Codex rate-limit windows and reset times appear in the header. Open <code>/usage</code> for the full breakdown.</div>
+      <div><b>Keep parent and child sessions together</b>OpenCode sub-sessions appear beneath the session that started them. Follow delegated work without losing track of the original task.</div>
       <div><b>Start in any folder</b><code>/cd</code> or <kbd>Ctrl+O</kbd>. Multi-line tasks, pastes, and clipboard images stay one draft.</div>
       <div><b>Migrate a conversation</b>Move a session to another harness with <code>/migrate</code>, or to another folder with <kbd>Ctrl+M</kbd>, via <a href="https://session-migrate.github.io/">session-migrate</a>.</div>
       <div><b>Pause what you're waiting on</b><kbd>Ctrl+T</kbd> moves a session into a collapsed Paused group.</div>
