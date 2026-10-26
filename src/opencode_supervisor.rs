@@ -132,6 +132,22 @@ pub enum SharedClientReach {
     AnyDirectory,
 }
 
+/// The V2 service registration named by the environment. Unit tests always
+/// see it unset: a developer shell running the live V2 profile exports it, and
+/// tests must not adopt that real service.
+pub(crate) fn service_file_env() -> Option<std::ffi::OsString> {
+    if cfg!(test) {
+        return None;
+    }
+    std::env::var_os("AGENTVIEW_OPENCODE_SERVICE_FILE")
+}
+
+/// Whether the environment selects the V2 API. Unset under unit tests, as
+/// with [`service_file_env`].
+pub(crate) fn api_env_is_v2() -> bool {
+    !cfg!(test) && std::env::var("AGENTVIEW_OPENCODE_API").as_deref() == Ok("v2")
+}
+
 impl OpenCodeSupervisor {
     /// Explicit protocol selection keeps isolated V2 trials away from a live
     /// V1 server. Persisted endpoint records remain authoritative on reconnect.
@@ -139,7 +155,7 @@ impl OpenCodeSupervisor {
         if let Some(record) = load_record(&self.record_path, &self.state_dir)? {
             return Ok(record.api == ApiVersion::V2);
         }
-        Ok(std::env::var("AGENTVIEW_OPENCODE_API").as_deref() == Ok("v2"))
+        Ok(api_env_is_v2())
     }
     pub fn host(executable: impl Into<String>) -> Result<Self> {
         Self::with_state_dir(executable, default_state_dir()?)
@@ -161,7 +177,7 @@ impl OpenCodeSupervisor {
     /// Opt-in registration discovery. A supplied registration is authoritative:
     /// never silently create a second service when its credentials are wrong.
     fn discover_v2_service(&self) -> Result<()> {
-        let Some(path) = std::env::var_os("AGENTVIEW_OPENCODE_SERVICE_FILE") else {
+        let Some(path) = service_file_env() else {
             return Ok(());
         };
         let mut options = OpenOptions::new();
@@ -970,7 +986,7 @@ impl OpenCodeSupervisor {
             return Ok(());
         };
         if record.api != ApiVersion::V2
-            || std::env::var_os("AGENTVIEW_OPENCODE_SERVICE_FILE").is_none()
+            || service_file_env().is_none()
         {
             return Ok(());
         }
@@ -1077,7 +1093,7 @@ impl OpenCodeSupervisor {
         let mut unresumed = Vec::new();
         for turn in pending {
             if record.api == ApiVersion::V2
-                && std::env::var_os("AGENTVIEW_OPENCODE_SERVICE_FILE").is_some()
+                && service_file_env().is_some()
             {
                 // Managed V2 boot already resumes durable execution claims,
                 // including children and interrupted tools. Injecting another
@@ -1128,7 +1144,7 @@ impl OpenCodeSupervisor {
     ) -> Result<Vec<InterruptedTurn>> {
         let mut pending = load_pending_turns(&self.state_dir.join(RESTART_PENDING_FILE))?;
         if previous.is_some_and(|record| record.api == ApiVersion::V2)
-            && std::env::var_os("AGENTVIEW_OPENCODE_SERVICE_FILE").is_some()
+            && service_file_env().is_some()
         {
             return Ok(pending);
         }
@@ -1207,7 +1223,7 @@ impl OpenCodeSupervisor {
         awaiting_input: &[String],
     ) -> Result<()> {
         if record.api != ApiVersion::V2
-            || std::env::var_os("AGENTVIEW_OPENCODE_SERVICE_FILE").is_some()
+            || service_file_env().is_some()
         {
             return Ok(());
         }
@@ -1448,14 +1464,14 @@ impl OpenCodeSupervisor {
                 .or(saved.as_ref())
                 .map(|r| r.api)
                 .unwrap_or_else(|| {
-                    if std::env::var("AGENTVIEW_OPENCODE_API").as_deref() == Ok("v2") {
+                    if api_env_is_v2() {
                         ApiVersion::V2
                     } else {
                         ApiVersion::V1
                     }
                 });
             let service_mode = api == ApiVersion::V2
-                && std::env::var_os("AGENTVIEW_OPENCODE_SERVICE_FILE").is_some();
+                && service_file_env().is_some();
             let (port, username, password) = match endpoint {
                 Some(record) => (
                     record.port,

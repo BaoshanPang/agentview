@@ -1142,7 +1142,7 @@ fn new_frontend_command(
 }
 
 fn unmanaged_v2() -> bool {
-    std::env::var("AGENTVIEW_OPENCODE_API").is_ok_and(|api| api == "v2")
+    crate::opencode_supervisor::api_env_is_v2()
 }
 
 fn host_runner(executable: &str) -> Arc<dyn CommandRunner> {

@@ -1132,8 +1132,11 @@ mod tests {
         };
         // launchd belongs to root, so libproc refuses it.
         let files = open_store_files(&[1, std::process::id()], &runner);
+        // libproc reads this process directly; other tests running in it may
+        // hold their own temporary store.db open, so only check pid 1 here.
+        let from_lsof: Vec<_> = files.into_iter().filter(|(pid, _)| *pid == 1).collect();
         assert_eq!(
-            files,
+            from_lsof,
             vec![(1, PathBuf::from("/Users/m/.cursor/chats/h/id/store.db"))]
         );
         let requests = runner.requests.lock().unwrap();
