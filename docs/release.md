@@ -6,9 +6,12 @@ artifacts consumed by [`install.sh`](../install.sh).
 
 ## Release status
 
-No release has been published yet. Release archives must be built, tested,
-packaged, checksum-verified, and installer-tested on the exact tagged commit
-before manual publication. The adjacent `.sha256` release asset records the
+Pushing an annotated `vMAJOR.MINOR.PATCH` tag runs
+[`release.yml`](../.github/workflows/release.yml). It builds and packages every
+target below on a native runner, then publishes one GitHub release with all
+archives and checksums. The tag must equal the `Cargo.toml` version. The manual
+procedure below is the fallback when the workflow cannot run.
+Release archives are built, packaged, and checksum-verified on the exact tagged commit. The adjacent `.sha256` release asset records the
 verified archive digest. Native hosted runners cover both Linux architectures,
 both macOS architectures, and Windows x64.
 
@@ -59,9 +62,8 @@ installations cannot rely on developer-mode symlinks.
 ## Publication policy
 
 GitHub Actions runs read-only quality, test, portability, and provider-setup
-gates, but it does not publish releases. Release
-artifacts are built, smoke-tested, checksum-verified, and uploaded manually by
-the maintainer from the exact reviewed commit.
+gates on every push. Only a pushed version tag publishes a release, through
+`release.yml`, from the exact tagged commit.
 
 The README deliberately uses repository-owned status badges. Its **Tests**
 badge links to the complete evidence record in

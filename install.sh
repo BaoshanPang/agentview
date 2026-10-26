@@ -95,7 +95,7 @@ fi
 
 if [[ "$requested_version" == "latest" ]]; then
   release_json="$(curl "${curl_args[@]}" "${github_api_url}/repos/${repo}/releases/latest")" ||
-    fail "no release found for ${repo}; set GH_TOKEN only when using a private fork or encountering API rate limits"
+    fail "no published release found for ${repo} (see https://github.com/${repo}/releases); set GH_TOKEN only when using a private fork or encountering API rate limits"
   tag="$(printf '%s\n' "$release_json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
   [[ -n "$tag" ]] || fail "the latest release response did not contain a tag"
 else
