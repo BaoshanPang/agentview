@@ -350,6 +350,7 @@ fn empty_state_lines(includes_completed: bool) -> Vec<Line<'static>> {
     ]
 }
 
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn render_session_row(
     session: &AgentSession,
