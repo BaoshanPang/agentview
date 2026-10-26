@@ -7,7 +7,7 @@ See which one needs you. Jump in, jump back out. Works with 18 coding
 harnesses and plain shell jobs.
 
 [![Tests](https://img.shields.io/badge/tests-verified-506CF7.svg)](docs/testing.md)
-[![Release](https://img.shields.io/badge/release-v0.1.0-506CF7.svg)](https://github.com/moritzWa/agentview/releases/latest)
+[![Release](https://img.shields.io/badge/release-v0.2.0-506CF7.svg)](https://github.com/moritzWa/agentview/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-506CF7.svg)](LICENSE)
 
 <img src="docs/assets/demo.gif" alt="agentview demo in light mode: usage limits in the header, OpenCode sub-sessions indented under the session that started them, searching 500 past sessions by message text with Ctrl+G, and picking a model grouped by provider" width="800">
