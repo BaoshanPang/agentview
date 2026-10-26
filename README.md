@@ -170,6 +170,11 @@ harness's own interface.
 Versions, auth, and per-harness caveats are in the
 [provider notes](docs/exploration/README.md).
 
+agentview pairs well with OpenCode. My
+[OpenCode setup](https://gist.github.com/moritzWa/9c0eb6f5d36a238714a40b900fde09ce)
+adds Cursor models, background shells, worktree tools, and long-running turns
+that survive Cursor dropping out.
+
 ## Docs
 
 [Install](docs/install.md) · [CLI](docs/cli.md) ·
