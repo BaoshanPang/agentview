@@ -237,7 +237,7 @@ fn render_session_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
             if is_selected {
                 selected_line = Some(lines.len());
             }
-            lines.push(render_session_row(
+            lines.push(render_tree_session_row(
                 session,
                 app.view_mode,
                 area.width,
@@ -246,6 +246,7 @@ fn render_session_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 app.live_animation_visible(),
                 is_selected.then(|| app.pending_removal_verb()).flatten(),
                 depth,
+                ChildActivity::of(app, group, position),
             ));
         }
         let hidden = app.hidden_session_count(group);
@@ -360,8 +361,81 @@ fn render_session_row(
     pending_removal: Option<&str>,
     depth: usize,
 ) -> Line<'static> {
-    let symbol = state_symbol(session.state, live_animation_visible);
-    let symbol_style = Style::default().fg(state_color(session.state));
+    render_tree_session_row(
+        session,
+        view_mode,
+        width,
+        show_provider,
+        selected,
+        live_animation_visible,
+        pending_removal,
+        depth,
+        ChildActivity::default(),
+    )
+}
+
+/// How many sessions under a row are still busy. A parent whose own turn is
+/// over reads "Waiting" while any of them is working or needs input.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ChildActivity {
+    working: usize,
+    needs_input: usize,
+}
+
+impl ChildActivity {
+    fn of(app: &App, group: &crate::app::Group, position: usize) -> Self {
+        let mut activity = Self::default();
+        for below in crate::session_tree::descendants(&group.depths, position) {
+            let Some(index) = group.sessions.get(below) else {
+                continue;
+            };
+            match app.snapshot.sessions[*index].state {
+                SessionState::Working => activity.working += 1,
+                SessionState::NeedsInput => activity.needs_input += 1,
+                _ => {}
+            }
+        }
+        activity
+    }
+
+    fn summary(self) -> String {
+        let mut parts = Vec::new();
+        if self.working > 0 {
+            parts.push(format!("{} working", self.working));
+        }
+        if self.needs_input > 0 {
+            parts.push(format!(
+                "{} need{} input",
+                self.needs_input,
+                if self.needs_input == 1 { "s" } else { "" }
+            ));
+        }
+        parts.join(" · ")
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_tree_session_row(
+    session: &AgentSession,
+    view_mode: ViewMode,
+    width: u16,
+    show_provider: bool,
+    selected: bool,
+    live_animation_visible: bool,
+    pending_removal: Option<&str>,
+    depth: usize,
+    children: ChildActivity,
+) -> Line<'static> {
+    let waiting = view_mode == ViewMode::Directory
+        && !matches!(session.state, SessionState::Working | SessionState::NeedsInput)
+        && children != ChildActivity::default();
+    let shown_state = if waiting {
+        SessionState::Working
+    } else {
+        session.state
+    };
+    let symbol = state_symbol(shown_state, live_animation_visible);
+    let symbol_style = Style::default().fg(state_color(shown_state));
     // Provider identity is primary row information when the list mixes
     // providers. Keep the complete names of every built-in provider visible
     // instead of requiring users to decode the old C@H/X@D-style marker.
@@ -413,9 +487,15 @@ fn render_session_row(
     let state_label = match (view_mode == ViewMode::Directory, hold_reason) {
         (false, _) => "",
         (true, Some(_)) => "Background",
+        (true, None) if waiting => "Waiting",
         (true, None) => short_state(session.state),
     };
-    let summary_text = hold_reason.unwrap_or(&session.summary);
+    let children_summary = children.summary();
+    let summary_text = match hold_reason {
+        Some(reason) => reason,
+        None if waiting => children_summary.as_str(),
+        None => session.summary.as_str(),
+    };
     let age = format_age(session.age(SystemTime::now()));
     let prs = session
         .pull_requests
@@ -2876,6 +2956,43 @@ mod tests {
             0,
         );
         assert_eq!(completed.spans[0].content, " • ");
+    }
+
+    #[test]
+    fn a_done_parent_with_busy_children_reads_waiting() {
+        let children = ChildActivity {
+            working: 2,
+            needs_input: 1,
+        };
+        let row_text = |state, view_mode| {
+            let item = session("manager", state);
+            render_tree_session_row(&item, view_mode, 120, true, false, true, None, 0, children)
+                .spans
+                .iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        };
+        let done = row_text(SessionState::Completed, ViewMode::Directory);
+        assert!(done.contains("Waiting · 2 working · 1 needs input"), "{done}");
+        assert!(done.contains(" ✳ "), "{done}");
+
+        let asking = row_text(SessionState::NeedsInput, ViewMode::Directory);
+        assert!(asking.contains("Needs input"), "{asking}");
+        assert!(!asking.contains("Waiting"), "{asking}");
+
+        let quiet = render_tree_session_row(
+            &session("manager", SessionState::Completed),
+            ViewMode::Directory,
+            120,
+            true,
+            false,
+            true,
+            None,
+            0,
+            ChildActivity::default(),
+        );
+        let quiet: String = quiet.spans.iter().map(|span| span.content.to_string()).collect();
+        assert!(quiet.contains("Done"), "{quiet}");
     }
 
     #[test]

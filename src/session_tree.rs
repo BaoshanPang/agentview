@@ -149,6 +149,19 @@ pub fn arrange(
     (order, depths)
 }
 
+/// Positions of the rows under `position` in a depth-first `depths` list from
+/// [`arrange`]: every following row deeper than it, up to the next sibling.
+pub fn descendants(depths: &[usize], position: usize) -> std::ops::Range<usize> {
+    let Some(&depth) = depths.get(position) else {
+        return position..position;
+    };
+    let end = depths[position + 1..]
+        .iter()
+        .position(|other| *other <= depth)
+        .map_or(depths.len(), |offset| position + 1 + offset);
+    position + 1..end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,6 +214,16 @@ mod tests {
         let (order, depths) = arrange(&[0, 1, 2, 3, 4], |item| parents.get(&item).copied());
         assert_eq!(order, vec![0, 3, 1, 4, 2]);
         assert_eq!(depths, vec![0, 1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn descendants_stop_at_the_next_sibling() {
+        let depths = [0, 1, 2, 1, 0, 1];
+        assert_eq!(descendants(&depths, 0), 1..4);
+        assert_eq!(descendants(&depths, 1), 2..3);
+        assert_eq!(descendants(&depths, 2), 3..3);
+        assert_eq!(descendants(&depths, 4), 5..6);
+        assert_eq!(descendants(&depths, 9), 9..9);
     }
 
     #[test]
