@@ -76,7 +76,7 @@ impl WaitingJob {
     pub fn status_text(&self) -> &'static str {
         match self.reason.as_str() {
             "ram" => "Low RAM",
-            "cpu" => "CPU busy",
+            "cpu" | "cores" | "load" => "CPU busy",
             _ => "Waiting",
         }
     }
@@ -88,6 +88,9 @@ impl WaitingJob {
             "slots" => "all slots in use",
             "ram" => "low free RAM",
             "cpu" => "CPU saturated",
+            "cores" => "all CPU cores spoken for",
+            "load" => "machine overloaded",
+            "settle" => "another job is starting up",
             _ => "busy",
         }
     }
@@ -324,6 +327,15 @@ mod tests {
              "since_ms": 6000, "weight": 1, "reason": "queue"}
         ]
     }"#;
+
+    #[test]
+    fn core_and_load_waits_read_as_cpu_busy() {
+        let json = r#"{"slots_total": 32, "slots_in_use": 1, "running": [],
+            "waiting": [{"cmd": "cargo build", "cwd": "/w", "since_ms": 1, "weight": 1, "reason": "cores"}]}"#;
+        let queue = Queue::parse(json.as_bytes()).unwrap();
+        assert_eq!(queue.waiting[0].status_text(), "CPU busy");
+        assert_eq!(queue.waiting[0].reason_text(), "all CPU cores spoken for");
+    }
 
     #[test]
     fn parses_the_status_json_and_ignores_unknown_fields() {
