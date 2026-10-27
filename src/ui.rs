@@ -189,14 +189,14 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 /// Session rows the list always keeps, so the job panel never squeezes it out.
 const MIN_LIST_ROWS: u16 = 10;
-const QUEUE_PANEL_JOB_ROWS: usize = 6;
+const QUEUE_PANEL_JOB_ROWS: usize = 8;
 
 /// A blank line, a heading and one row per job, as many as `spare` lines allow.
 fn queue_panel_height(app: &App, spare: u16) -> u16 {
     let Some(queue) = app.queue.as_ref().filter(|queue| !queue.is_idle()) else {
         return 0;
     };
-    let fixed = queue_panel_fixed_lines(queue);
+    let fixed = QUEUE_PANEL_FIXED_LINES;
     if spare <= fixed {
         return 0;
     }
@@ -205,16 +205,14 @@ fn queue_panel_height(app: &App, spare: u16) -> u16 {
     fixed + rows as u16
 }
 
-/// A blank line, plus one line saying when the queue should clear if that is known.
-fn queue_panel_fixed_lines(queue: &crate::queue::Queue) -> u16 {
-    1 + u16::from(queue.est_free_ms.is_some())
-}
+/// A blank line and the heading.
+const QUEUE_PANEL_FIXED_LINES: u16 = 2;
 
 fn render_queue_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(queue) = app.queue.as_ref() else {
         return;
     };
-    let fixed = queue_panel_fixed_lines(queue);
+    let fixed = QUEUE_PANEL_FIXED_LINES;
     if area.height <= fixed {
         return;
     }
@@ -223,16 +221,19 @@ fn render_queue_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let attention = Style::default().fg(palette().attention);
     let jobs = queue.running.len() + queue.waiting.len();
     let rows = usize::from(area.height - fixed);
-    let mut lines = vec![Line::default()];
+    let mut heading = vec![Span::styled(
+        "Heavy jobs",
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
     if let Some(estimate) = queue.est_free_ms {
-        lines.push(Line::from(Span::styled(
-            format!("All clear in {}", crate::queue::clear_in_text(estimate)),
+        heading.push(Span::styled(
+            format!(" · all clear in {}", crate::queue::clear_in_text(estimate)),
             dim,
-        )));
+        ));
     }
+    let mut lines = vec![Line::default(), Line::from(heading)];
 
     let shown = if jobs > rows { rows.saturating_sub(1) } else { rows };
-    let name_width = 24;
     let folder = |cwd: &str| {
         let parts: Vec<_> = std::path::Path::new(cwd)
             .components()
@@ -241,6 +242,26 @@ fn render_queue_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .collect();
         parts[parts.len().saturating_sub(2)..].join("/")
     };
+    let jobs_listed: Vec<_> = queue
+        .running
+        .iter()
+        .map(|job| (job.name(), &job.cwd))
+        .chain(queue.waiting.iter().map(|job| (job.name(), &job.cwd)))
+        .take(shown)
+        .collect();
+    let folder_width = jobs_listed
+        .iter()
+        .map(|(_, cwd)| display_width(&folder(cwd)))
+        .max()
+        .unwrap_or(0)
+        .min(24);
+    let longest_name = jobs_listed
+        .iter()
+        .map(|(name, _)| display_width(name))
+        .max()
+        .unwrap_or(0);
+    let room = usize::from(area.width).saturating_sub(16 + 2 + folder_width);
+    let name_width = longest_name.min(room.max(12));
     let row = |status: &str, style: Style, since_ms: u64, name: &str, cwd: &str| {
         Line::from(vec![
             Span::styled(format!("{status:<9}"), style),
@@ -249,17 +270,17 @@ fn render_queue_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 dim,
             ),
             Span::raw(pad_to_width(truncate(name, name_width), name_width)),
-            Span::styled(format!("  {}", truncate(&folder(cwd), 24)), dim),
+            Span::styled(format!("  {}", truncate(&folder(cwd), folder_width)), dim),
         ])
     };
     let running = queue
         .running
         .iter()
-        .map(|job| row("Running", Style::default().fg(palette().fg), job.started_ms, job.name(), &job.cwd));
+        .map(|job| row("Running", Style::default().fg(palette().fg), job.started_ms, &job.name(), &job.cwd));
     let waiting = queue
         .waiting
         .iter()
-        .map(|job| row(job.status_text(), attention, job.since_ms, job.name(), &job.cwd));
+        .map(|job| row(job.status_text(), attention, job.since_ms, &job.name(), &job.cwd));
     lines.extend(running.chain(waiting).take(shown));
     if jobs > shown {
         lines.push(Line::from(Span::styled(
@@ -303,7 +324,7 @@ fn queued_note(app: &App, session: &AgentSession) -> Option<String> {
         })?;
     Some(format!(
         "#{place} in line for {} · {}",
-        truncate(job.name(), 40),
+        truncate(&job.name(), 40),
         job.reason_text()
     ))
 }
@@ -4386,8 +4407,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
         terminal.draw(|frame| render(frame, &app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer());
-        assert!(rendered.contains("All clear in ~3m"), "{rendered}");
-        assert!(!rendered.contains("Heavy jobs"), "{rendered}");
+        assert!(rendered.contains("Heavy jobs · all clear in ~3m"), "{rendered}");
         let running = rendered.find("Running").expect(&rendered);
         let waiting = rendered.find("Waiting").expect(&rendered);
         let composer = rendered.find("describe a task").expect(&rendered);
@@ -4399,7 +4419,7 @@ mod tests {
         app.queue.as_mut().unwrap().running.clear();
         app.queue.as_mut().unwrap().waiting.clear();
         terminal.draw(|frame| render(frame, &app)).unwrap();
-        assert!(!buffer_text(terminal.backend().buffer()).contains("All clear"));
+        assert!(!buffer_text(terminal.backend().buffer()).contains("Heavy jobs"));
     }
 
     #[test]
@@ -4412,11 +4432,35 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(110, 40)).unwrap();
         terminal.draw(|frame| render(frame, &app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer());
-        assert!(rendered.contains("+5 more"), "{rendered}");
+        assert!(rendered.contains("+3 more"), "{rendered}");
 
         let mut small = Terminal::new(TestBackend::new(110, 14)).unwrap();
         small.draw(|frame| render(frame, &app)).unwrap();
         assert!(!buffer_text(small.backend().buffer()).contains("Running"));
+    }
+
+    #[test]
+    fn unlabeled_commands_show_what_they_run_in_the_width_there_is() {
+        let mut app = App::new(SessionSnapshot::default());
+        let mut queue = busy_queue();
+        let mut running = queue.running[0].clone();
+        running.label = None;
+        running.cmd = "env -u FORCE_COLOR NO_COLOR=1 PATH=/a:/b bash -c git commit --no-edit && bun run test:web:backend -- tests/backend/public-mcp.test.ts".into();
+        running.cwd = "/Users/m/.worktrees/public-source".into();
+        let mut waiting = queue.waiting[0].clone();
+        waiting.label = None;
+        waiting.cmd = "bash -c set -e\ngo test -C services/workspace-exec-daemon -count=1 -v ./...".into();
+        waiting.cwd = "/Users/m/Code/arca-wt/browser-profile".into();
+        queue.running = vec![running];
+        queue.waiting = vec![waiting];
+        app.queue = Some(queue);
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+        assert!(rendered.contains("bun run test:web:backend -- tests/backend/public-mcp.test.ts"), "{rendered}");
+        assert!(rendered.contains("go test -C services/workspace-exec-daemon -count=1 -v ./..."), "{rendered}");
+        assert!(rendered.contains("arca-wt/browser-profile"), "{rendered}");
+        println!("{rendered}");
     }
 
     fn session(name: &str, state: SessionState) -> AgentSession {

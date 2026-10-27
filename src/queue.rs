@@ -62,14 +62,14 @@ pub struct WaitingJob {
 }
 
 impl RunningJob {
-    pub fn name(&self) -> &str {
-        self.label.as_deref().unwrap_or(&self.cmd)
+    pub fn name(&self) -> String {
+        friendly_name(self.label.as_deref(), &self.cmd)
     }
 }
 
 impl WaitingJob {
-    pub fn name(&self) -> &str {
-        self.label.as_deref().unwrap_or(&self.cmd)
+    pub fn name(&self) -> String {
+        friendly_name(self.label.as_deref(), &self.cmd)
     }
 
     /// What the job's status column says: Waiting, unless the machine is the holdup.
@@ -177,6 +177,113 @@ impl Drop for QueueWatcher {
     }
 }
 
+/// A job's label, or else the command with the wrapping noise taken off: `env`
+/// settings, `fnm exec --`, `bash -c` and setup lines like `cd` and `set -e`,
+/// leaving what the job actually runs, such as `bun run test:web:backend`.
+pub fn friendly_name(label: Option<&str>, cmd: &str) -> String {
+    if let Some(label) = label.filter(|label| !label.trim().is_empty()) {
+        return label.to_string();
+    }
+    let cleaned: String = cmd
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let name = core_command(cmd);
+    if name.is_empty() {
+        cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        name
+    }
+}
+
+const SETUP_COMMANDS: [&str; 6] = ["set", "cd", "export", "echo", "git", "true"];
+
+fn core_command(cmd: &str) -> String {
+    let normalized = cmd.replace("&&", "\n").replace(';', "\n");
+    let lines: Vec<&str> = normalized.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let (words, script) = unwrap_command(&words);
+        if let Some(script) = script {
+            let mut rest = vec![script.as_str()];
+            rest.extend(&lines[index + 1..]);
+            return core_command(&rest.join("\n"));
+        }
+        let Some(program) = words.first() else {
+            continue;
+        };
+        if !SETUP_COMMANDS.contains(program) {
+            return render_words(&words);
+        }
+    }
+    String::new()
+}
+
+/// Peels `env`, `fnm exec --`, `timeout` and leading `VAR=value` off a command.
+/// A `bash -c` returns its script instead, to be read the same way.
+fn unwrap_command<'a>(words: &[&'a str]) -> (Vec<&'a str>, Option<String>) {
+    let mut words = words.to_vec();
+    loop {
+        let Some(&program) = words.first() else {
+            return (words, None);
+        };
+        let base = program.rsplit('/').next().unwrap_or(program);
+        let skip = match base {
+            "env" => {
+                let mut index = 1;
+                while let Some(word) = words.get(index) {
+                    if *word == "-u" || *word == "--unset" {
+                        index += 2;
+                    } else if word.starts_with('-') || is_assignment(word) {
+                        index += 1;
+                    } else {
+                        break;
+                    }
+                }
+                index
+            }
+            "fnm" if words.get(1) == Some(&"exec") => words
+                .iter()
+                .position(|word| *word == "--")
+                .map_or(words.len(), |at| at + 1),
+            "timeout" => {
+                if words.get(1).is_some_and(|word| word.starts_with('-')) {
+                    3
+                } else {
+                    2
+                }
+            }
+            "bash" | "sh" | "zsh" if words.get(1) == Some(&"-c") => {
+                return (Vec::new(), Some(words[2..].join(" ")));
+            }
+            _ if is_assignment(program) => 1,
+            _ => return (words, None),
+        };
+        words = words.get(skip..).unwrap_or_default().to_vec();
+    }
+}
+
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+fn render_words(words: &[&str]) -> String {
+    let mut out = Vec::new();
+    for (index, word) in words.iter().enumerate() {
+        if word.starts_with('>') || word.starts_with("2>") || *word == "|" || *word == "&" {
+            break;
+        }
+        if index == 0 {
+            out.push(word.rsplit('/').next().unwrap_or(word));
+        } else {
+            out.push(word);
+        }
+    }
+    out.join(" ")
+}
+
 /// `4m12s`, `48s`, `1h05m`.
 pub fn duration_text(milliseconds: u64) -> String {
     let seconds = milliseconds / 1000;
@@ -223,9 +330,22 @@ mod tests {
         let queue = Queue::parse(STATUS.as_bytes()).unwrap();
         assert_eq!((queue.slots_in_use, queue.slots_total), (2, 2));
         assert_eq!(queue.running[0].name(), "cargo test");
+        assert_eq!(friendly_name(None, "bash -c cd apps/web && node scripts/test.mjs a.tsx > /tmp/x.log 2>&1; echo EXIT"), "node scripts/test.mjs a.tsx");
         assert_eq!(queue.waiting[0].name(), "e2e");
         assert_eq!(queue.waiting[1].reason_text(), "others are ahead");
         assert!(!queue.is_idle());
+    }
+
+    #[test]
+    fn commands_lose_their_wrapping_noise() {
+        let name = |cmd: &str| friendly_name(None, cmd);
+        assert_eq!(name("env -u FORCE_COLOR NO_COLOR=1 PATH=/a:/b bash -c git commit --no-edit && bun run test:web && git push"), "bun run test:web");
+        assert_eq!(name("bash -c set -e\ngo test -count=1 ./...\nbun run ship"), "go test -count=1 ./...");
+        assert_eq!(name("fnm exec --using 24.22.1 -- bun run test:web:backend -- tests/a.ts"), "bun run test:web:backend -- tests/a.ts");
+        assert_eq!(name("env POSTGRES_URL=postgresql://x NODE_ENV=dev /usr/local/bin/bun run test"), "bun run test");
+        assert_eq!(name("cargo test --lib"), "cargo test --lib");
+        assert_eq!(name("set -e"), "set -e");
+        assert_eq!(friendly_name(Some("evals"), "x"), "evals");
     }
 
     #[test]
