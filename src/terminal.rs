@@ -335,7 +335,17 @@ pub fn run_dashboard(
     if let Some(usage) = fixture_usage {
         app.usage = usage;
     }
+    // The queue is local files, so it is read in every mode except a fixture
+    // that has not asked for a queue directory of its own.
+    let queue_watcher = if control.provider_io_enabled()
+        || std::env::var_os("AGENT_BOUNCER_DIR").is_some()
+    {
+        crate::queue::QueueWatcher::spawn()
+    } else {
+        None
+    };
     let mut usage_minute = 0;
+    let mut last_queue_second = 0;
     let mut terminal = TerminalSession::enter()?;
     let initial_size = terminal.terminal.size()?;
     app.set_session_page_size(session_page_size_for_terminal(initial_size.height));
@@ -809,6 +819,22 @@ pub fn run_dashboard(
                     needs_draw = true;
                 }
             }
+        }
+        if let Some(queue) = queue_watcher
+            .as_ref()
+            .and_then(crate::queue::QueueWatcher::take_latest)
+        {
+            let queue = Some(queue);
+            if app.queue != queue {
+                app.queue = queue;
+                needs_draw = true;
+            }
+        }
+        // Waits and run times count up, so a busy queue redraws every second.
+        let queue_second = crate::queue::now_ms() / 1000;
+        if app.queue.as_ref().is_some_and(|queue| !queue.is_idle()) && queue_second != last_queue_second {
+            last_queue_second = queue_second;
+            needs_draw = true;
         }
         let minute = crate::usage::now() / 60;
         if !app.usage.is_empty() && minute != usage_minute {
@@ -1891,7 +1917,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> AppAction {
     if key.kind == KeyEventKind::Release {
         return AppAction::None;
     }
-    if app.overlay == Overlay::Usage {
+    if matches!(app.overlay, Overlay::Usage | Overlay::Queue) {
         app.overlay = Overlay::None;
         return AppAction::None;
     }
@@ -3600,6 +3626,26 @@ mod tests {
         handle_key(&mut app, control_key('r'));
         assert_eq!(app.overlay, Overlay::Help);
         assert!(app.input.is_empty());
+    }
+
+    #[test]
+    fn queue_command_opens_a_popup_that_any_key_closes() {
+        let mut app = app();
+        let type_command = |app: &mut App| {
+            for character in "/queue".chars() {
+                handle_key(app, key(KeyCode::Char(character)));
+            }
+            handle_key(app, key(KeyCode::Enter));
+        };
+        type_command(&mut app);
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.notice.as_deref().is_some_and(|notice| notice.contains("no job queue")));
+
+        app.queue = Some(crate::queue::Queue::default());
+        type_command(&mut app);
+        assert_eq!(app.overlay, Overlay::Queue);
+        assert_eq!(handle_key(&mut app, key(KeyCode::Esc)), AppAction::None);
+        assert_eq!(app.overlay, Overlay::None);
     }
 
     #[test]

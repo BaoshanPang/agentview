@@ -83,6 +83,8 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         render_migration_target_picker(frame, app, area);
     } else if app.overlay == Overlay::Usage {
         render_usage_popup(frame, app, area);
+    } else if app.overlay == Overlay::Queue {
+        render_queue_popup(frame, app, area);
     }
 }
 
@@ -175,6 +177,77 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         area,
     );
     render_usage(frame, app, area);
+    render_queue_summary(frame, app, area);
+}
+
+/// `2/3 slots · 1 waiting` beside the title while the job queue has anything in it.
+fn render_queue_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(queue) = app.queue.as_ref().filter(|queue| !queue.is_idle()) else {
+        return;
+    };
+    if area.height <= 2 || area.width < 70 {
+        return;
+    }
+    let title = format!("agentview v{}", env!("CARGO_PKG_VERSION"));
+    let x = area.x + 9 + display_width(&title) as u16 + 3;
+    let mut spans = vec![Span::styled(
+        format!("queue {}/{} slots", queue.slots_in_use, queue.slots_total),
+        Style::default().fg(palette().dim),
+    )];
+    if !queue.waiting.is_empty() {
+        spans.push(Span::styled(
+            format!(" · {} waiting", queue.waiting.len()),
+            Style::default().fg(palette().attention),
+        ));
+    }
+    let width = area.x + area.width.saturating_sub(x);
+    if width < 12 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().bg)),
+        Rect {
+            x,
+            y: area.y,
+            width,
+            height: 1,
+        },
+    );
+}
+
+/// What a Working session says when its own tool call is stuck in the queue.
+fn queued_note(app: &App, session: &AgentSession) -> Option<String> {
+    if session.state != SessionState::Working {
+        return None;
+    }
+    // A tool call runs from the session's folder, so a waiting job belongs to
+    // the Working session whose folder is the closest one above it. When two
+    // sessions share that folder there is no telling which one asked, so
+    // neither says anything.
+    let depth = |other: &AgentSession| other.cwd.components().count();
+    let (place, job) = app
+        .queue
+        .as_ref()?
+        .waiting
+        .iter()
+        .enumerate()
+        .find_map(|(index, job)| {
+            let folder = std::path::Path::new(&job.cwd);
+            let owners = app
+                .snapshot
+                .sessions
+                .iter()
+                .filter(|other| other.state == SessionState::Working && folder.starts_with(&other.cwd));
+            let closest = owners.clone().map(depth).max()?;
+            let mut nearest = owners.filter(|other| depth(other) == closest);
+            let first = nearest.next()?;
+            (nearest.next().is_none() && first.id == session.id).then_some((index + 1, job))
+        })?;
+    Some(format!(
+        "#{place} in line for {} · {}",
+        truncate(job.name(), 40),
+        job.reason_text()
+    ))
 }
 
 fn render_session_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
@@ -247,6 +320,7 @@ fn render_session_list(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 is_selected.then(|| app.pending_removal_verb()).flatten(),
                 depth,
                 ChildActivity::of(app, group, position),
+                queued_note(app, session).as_deref(),
             ));
         }
         let hidden = app.hidden_session_count(group);
@@ -372,6 +446,7 @@ fn render_session_row(
         pending_removal,
         depth,
         ChildActivity::default(),
+        None,
     )
 }
 
@@ -426,6 +501,7 @@ fn render_tree_session_row(
     pending_removal: Option<&str>,
     depth: usize,
     children: ChildActivity,
+    queued: Option<&str>,
 ) -> Line<'static> {
     let waiting = view_mode == ViewMode::Directory
         && !matches!(session.state, SessionState::Working | SessionState::NeedsInput)
@@ -485,8 +561,10 @@ fn render_tree_session_row(
                 reason
             }
         });
+    let queued = queued.filter(|_| hold_reason.is_none());
     let state_label = match (view_mode == ViewMode::Directory, hold_reason) {
         (false, _) => "",
+        (true, None) if queued.is_some() => "Queued",
         (true, Some(_)) => "Background",
         (true, None) if waiting => "Waiting",
         (true, None) => short_state(session.state),
@@ -494,6 +572,7 @@ fn render_tree_session_row(
     let children_summary = children.summary();
     let summary_text = match hold_reason {
         Some(reason) => reason,
+        None if queued.is_some() => queued.unwrap_or_default(),
         None if waiting => children_summary.as_str(),
         None => session.summary.as_str(),
     };
@@ -1218,6 +1297,101 @@ fn render_usage_popup(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+fn render_queue_popup(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(queue) = app.queue.as_ref() else {
+        return;
+    };
+    let now = crate::queue::now_ms();
+    let dim = Style::default().fg(palette().dim);
+    let heading = Style::default()
+        .fg(palette().fg)
+        .add_modifier(Modifier::BOLD);
+    let mut machine = vec![format!("{}/{} slots in use", queue.slots_in_use, queue.slots_total)];
+    if let Some(free) = queue.avail_gb {
+        machine.push(format!("free RAM {free:.1} GB"));
+    }
+    if let Some(swap) = queue.swap_gb {
+        machine.push(format!("swap {swap:.1} GB"));
+    }
+    let name_width = queue
+        .running
+        .iter()
+        .map(|job| display_width(job.name()))
+        .chain(queue.waiting.iter().map(|job| display_width(job.name())))
+        .max()
+        .unwrap_or(0)
+        .clamp(12, 34);
+    let folder = |cwd: &str| abbreviate_path(std::path::Path::new(cwd));
+    let mut lines = vec![Line::from(machine.join("   ")), Line::default()];
+    if queue.is_idle() {
+        lines.push(Line::from(Span::styled("nothing running, nobody waiting", dim)));
+    }
+    if !queue.running.is_empty() {
+        lines.push(Line::from(Span::styled("running", heading)));
+        for job in &queue.running {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "  {:>7}  {:>7}  ",
+                        crate::queue::duration_text(now.saturating_sub(job.started_ms)),
+                        crate::queue::memory_text(job.rss_mb)
+                    ),
+                    dim,
+                ),
+                Span::raw(pad_to_width(truncate(job.name(), name_width), name_width)),
+                Span::styled(format!("  {}", truncate(&folder(&job.cwd), 36)), dim),
+            ]));
+        }
+        lines.push(Line::default());
+    }
+    if !queue.waiting.is_empty() {
+        lines.push(Line::from(Span::styled("waiting, first come first served", heading)));
+        for (index, job) in queue.waiting.iter().enumerate() {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(
+                        "  {}. {:>5}  {:<16}  ",
+                        index + 1,
+                        crate::queue::duration_text(now.saturating_sub(job.since_ms)),
+                        job.reason_text()
+                    ),
+                    Style::default().fg(palette().attention),
+                ),
+                Span::raw(pad_to_width(truncate(job.name(), name_width), name_width)),
+                Span::styled(format!("  {}", truncate(&folder(&job.cwd), 36)), dim),
+            ]));
+        }
+        lines.push(Line::default());
+    }
+    lines.push(Line::from(Span::styled(
+        "run jobs with agent-bouncer run --wait -- <command> · any key closes",
+        dim,
+    )));
+    let padding = Padding::new(3, 3, 1, 1);
+    let content_width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 2 + 6;
+    let popup_width = content_width.min(area.width.saturating_sub(2)).max(28);
+    let popup_height = (lines.len() as u16 + 2 + 2).min(area.height.saturating_sub(2));
+    let popup = Rect::new(
+        area.x + area.width.saturating_sub(popup_width) / 2,
+        area.y + area.height.saturating_sub(popup_height) / 2,
+        popup_width,
+        popup_height,
+    );
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(" job queue ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette().accent))
+                    .padding(padding),
+            )
+            .style(Style::default().bg(palette().bg).fg(palette().fg)),
+        popup,
+    );
+}
+
 /// The header marks capped history with a trailing plus on the done count.
 fn is_history_cap_warning(warning: &str) -> bool {
     warning.contains("history is limited")
@@ -1316,7 +1490,7 @@ fn contextual_footer(app: &App, width: u16) -> String {
         Overlay::Peek if app.input.is_empty() => "enter to open".into(),
         Overlay::Peek => "enter to send · esc to close".into(),
         Overlay::Help => "? to close help · esc also closes".into(),
-        Overlay::Usage => "any key to close".into(),
+        Overlay::Usage | Overlay::Queue => "any key to close".into(),
         Overlay::None if matches!(app.selection, Some(SelectionKey::ShowMore(_))) => {
             if width >= 55 {
                 "enter to show more · ↑/↓ to select · ? for shortcuts".into()
@@ -1537,6 +1711,7 @@ fn help_sections(app: &App) -> Vec<HelpSection> {
             ("/login", "open native setup"),
             ("/migrate", "copy selected to another harness"),
             ("/usage", "subscription limits and resets"),
+            ("/queue", "heavy jobs running and waiting"),
         ],
     });
     sections
@@ -2967,7 +3142,7 @@ mod tests {
         };
         let row_text = |state, view_mode| {
             let item = session("manager", state);
-            render_tree_session_row(&item, view_mode, 120, true, false, true, None, 0, children)
+            render_tree_session_row(&item, view_mode, 120, true, false, true, None, 0, children, None)
                 .spans
                 .iter()
                 .map(|span| span.content.to_string())
@@ -2991,6 +3166,7 @@ mod tests {
             None,
             0,
             ChildActivity::default(),
+            None,
         );
         let quiet: String = quiet.spans.iter().map(|span| span.content.to_string()).collect();
         assert!(quiet.contains("Done"), "{quiet}");
@@ -4179,6 +4355,89 @@ mod tests {
         }
         assert!(saw_selection);
         assert!(saw_dark_text);
+    }
+
+    fn busy_queue() -> crate::queue::Queue {
+        crate::queue::Queue::parse(
+            br#"{"slots_total": 2, "slots_in_use": 2, "avail_gb": 9.4, "swap_gb": 3.7,
+                "running": [{"cmd": "cargo test", "cwd": "/other", "started_ms": 1, "weight": 1, "rss_mb": 2100}],
+                "waiting": [{"label": "e2e", "cmd": "pnpm playwright test", "cwd": "/work/web",
+                             "since_ms": 1, "weight": 1, "reason": "slots"}]}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_working_session_stuck_in_the_queue_reads_queued() {
+        let mut app = App::new(SessionSnapshot {
+            sessions: vec![session("shop", SessionState::Working)],
+            ..SessionSnapshot::default()
+        });
+        app.queue = Some(busy_queue());
+        let note = queued_note(&app, &app.snapshot.sessions[0]).unwrap();
+        assert_eq!(note, "#1 in line for e2e · all slots in use");
+
+        let row = |note: Option<&str>| {
+            render_tree_session_row(
+                &session("shop", SessionState::Working),
+                ViewMode::Directory,
+                120,
+                true,
+                false,
+                true,
+                None,
+                0,
+                ChildActivity::default(),
+                note,
+            )
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect::<String>()
+        };
+        assert!(row(Some(&note)).contains("Queued · #1 in line for e2e"), "{}", row(Some(&note)));
+        assert!(!row(None).contains("Queued"));
+
+        let mut sibling = session("sibling", SessionState::Working);
+        sibling.cwd = PathBuf::from("/work/web");
+        app.snapshot.sessions.push(sibling);
+        assert!(queued_note(&app, &app.snapshot.sessions[0]).is_none(), "the closer folder owns the job");
+        assert!(queued_note(&app, &app.snapshot.sessions[1]).is_some());
+        let mut twin = session("twin", SessionState::Working);
+        twin.cwd = PathBuf::from("/work/web");
+        app.snapshot.sessions.push(twin);
+        assert!(queued_note(&app, &app.snapshot.sessions[1]).is_none(), "two sessions share the folder");
+        app.snapshot.sessions.truncate(1);
+        app.snapshot.sessions[0].state = SessionState::Completed;
+        assert!(queued_note(&app, &app.snapshot.sessions[0]).is_none());
+        app.snapshot.sessions[0].state = SessionState::Working;
+        app.snapshot.sessions[0].cwd = PathBuf::from("/elsewhere");
+        assert!(queued_note(&app, &app.snapshot.sessions[0]).is_none());
+    }
+
+    #[test]
+    fn the_header_and_popup_show_the_queue() {
+        let mut app = App::new(SessionSnapshot::default());
+        app.queue = Some(busy_queue());
+        let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+        assert!(rendered.contains("queue 2/2 slots · 1 waiting"), "{rendered}");
+
+        app.queue.as_mut().unwrap().waiting.clear();
+        app.queue.as_mut().unwrap().running.clear();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert!(!buffer_text(terminal.backend().buffer()).contains("queue 2/2"));
+
+        app.queue = Some(busy_queue());
+        app.overlay = Overlay::Queue;
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+        assert!(rendered.contains("job queue"), "{rendered}");
+        assert!(rendered.contains("cargo test"), "{rendered}");
+        assert!(rendered.contains("1. "), "{rendered}");
+        assert!(rendered.contains("e2e"), "{rendered}");
+        assert!(rendered.contains("all slots in use"), "{rendered}");
     }
 
     fn session(name: &str, state: SessionState) -> AgentSession {

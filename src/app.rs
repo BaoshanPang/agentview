@@ -54,6 +54,7 @@ const DASHBOARD_COMMANDS: &[&str] = &[
     "/filter",
     "/migrate",
     "/usage",
+    "/queue",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,6 +62,7 @@ pub enum Overlay {
     None,
     Help,
     Usage,
+    Queue,
     Peek,
     HarnessPicker,
     ModelPicker,
@@ -324,6 +326,8 @@ pub struct App {
     pub color_scheme: ColorScheme,
     /// Latest subscription usage, sorted by provider.
     pub usage: Vec<crate::usage::Usage>,
+    /// The agent-bouncer queue, when that tool is installed.
+    pub queue: Option<crate::queue::Queue>,
 }
 
 impl App {
@@ -431,6 +435,7 @@ impl App {
             should_quit: false,
             color_scheme: ColorScheme::Dark,
             usage: Vec::new(),
+            queue: None,
         };
         app.rebuild_snapshot_cache();
         app.reconcile_selection();
@@ -732,7 +737,7 @@ impl App {
 
     pub fn activate(&mut self) -> AppAction {
         match self.overlay.clone() {
-            Overlay::Help | Overlay::Usage => {
+            Overlay::Help | Overlay::Usage | Overlay::Queue => {
                 self.overlay = Overlay::None;
                 AppAction::None
             }
@@ -3132,6 +3137,13 @@ impl App {
             "/usage" => {
                 self.notice = None;
                 self.overlay = Overlay::Usage;
+            }
+            "/queue" if self.queue.is_none() => self.set_notice(
+                "no job queue found; agentview shows agent-bouncer's when it is installed",
+            ),
+            "/queue" => {
+                self.notice = None;
+                self.overlay = Overlay::Queue;
             }
             "/filter" => {
                 self.set_filter(argument);
