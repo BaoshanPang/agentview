@@ -189,6 +189,9 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
 
 /// Session rows the list always keeps, so the job panel never squeezes it out.
 const MIN_LIST_ROWS: u16 = 10;
+/// Columns of the job panel: wide enough for "CPU busy " and "15m08s", so rows line up.
+const STATUS_WIDTH: usize = 9;
+const TIME_WIDTH: usize = 6;
 const QUEUE_PANEL_JOB_ROWS: usize = 8;
 
 /// A blank line, a heading and one row per job, as many as `spare` lines allow.
@@ -260,13 +263,13 @@ fn render_queue_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
         .map(|(name, _)| display_width(name))
         .max()
         .unwrap_or(0);
-    let room = usize::from(area.width).saturating_sub(16 + 2 + folder_width);
+    let room = usize::from(area.width).saturating_sub(STATUS_WIDTH + TIME_WIDTH + 2 + 2 + folder_width);
     let name_width = longest_name.min(room.max(12));
     let row = |status: &str, style: Style, since_ms: u64, name: &str, cwd: &str| {
         Line::from(vec![
-            Span::styled(format!("{status:<9}"), style),
+            Span::styled(format!("{status:<STATUS_WIDTH$}"), style),
             Span::styled(
-                format!("{:>5}  ", crate::queue::duration_text(now.saturating_sub(since_ms))),
+                format!("{:>TIME_WIDTH$}  ", crate::queue::duration_text(now.saturating_sub(since_ms))),
                 dim,
             ),
             Span::raw(pad_to_width(truncate(name, name_width), name_width)),
@@ -4420,6 +4423,36 @@ mod tests {
         app.queue.as_mut().unwrap().waiting.clear();
         terminal.draw(|frame| render(frame, &app)).unwrap();
         assert!(!buffer_text(terminal.backend().buffer()).contains("Heavy jobs"));
+    }
+
+    #[test]
+    fn job_columns_line_up_whatever_the_elapsed_time_reads() {
+        let now = crate::queue::now_ms();
+        let job = |cmd: &str, ago_s: u64| {
+            format!(
+                r#"{{"cmd": "{cmd}", "cwd": "/work/{cmd}", "started_ms": {}, "weight": 1}}"#,
+                now - ago_s * 1000
+            )
+        };
+        let json = format!(
+            r#"{{"slots_total": 6, "slots_in_use": 3, "running": [{}, {}, {}], "waiting": []}}"#,
+            job("cargo-a", 57),
+            job("cargo-b", 500),
+            job("cargo-c", 908)
+        );
+        let mut app = App::new(SessionSnapshot::default());
+        app.queue = crate::queue::Queue::parse(json.as_bytes());
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+        let columns: Vec<usize> = rendered
+            .lines()
+            .filter(|line| line.starts_with("Running"))
+            .map(|line| line.find("cargo-").expect(&rendered))
+            .collect();
+        assert_eq!(columns.len(), 3, "{rendered}");
+        assert!(columns.iter().all(|column| *column == columns[0]), "{rendered}");
+        assert!(rendered.contains("15m08s"), "{rendered}");
     }
 
     #[test]
