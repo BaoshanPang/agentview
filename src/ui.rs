@@ -196,42 +196,40 @@ fn queue_panel_height(app: &App, spare: u16) -> u16 {
     let Some(queue) = app.queue.as_ref().filter(|queue| !queue.is_idle()) else {
         return 0;
     };
-    if spare < 3 {
+    let fixed = queue_panel_fixed_lines(queue);
+    if spare <= fixed {
         return 0;
     }
     let jobs = queue.running.len() + queue.waiting.len();
-    let rows = jobs.min(QUEUE_PANEL_JOB_ROWS).min(usize::from(spare) - 2);
-    2 + rows as u16
+    let rows = jobs.min(QUEUE_PANEL_JOB_ROWS).min(usize::from(spare - fixed));
+    fixed + rows as u16
+}
+
+/// A blank line, plus one line saying when the queue should clear if that is known.
+fn queue_panel_fixed_lines(queue: &crate::queue::Queue) -> u16 {
+    1 + u16::from(queue.est_free_ms.is_some())
 }
 
 fn render_queue_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let Some(queue) = app.queue.as_ref().filter(|_| area.height >= 3) else {
+    let Some(queue) = app.queue.as_ref() else {
         return;
     };
+    let fixed = queue_panel_fixed_lines(queue);
+    if area.height <= fixed {
+        return;
+    }
     let now = crate::queue::now_ms();
     let dim = Style::default().fg(palette().dim);
     let attention = Style::default().fg(palette().attention);
     let jobs = queue.running.len() + queue.waiting.len();
-    let rows = usize::from(area.height) - 2;
-
-    let mut heading = vec![Span::styled(
-        "Heavy jobs",
-        Style::default().add_modifier(Modifier::BOLD),
-    )];
-    heading.push(Span::styled(format!(" · {} running", queue.running.len()), dim));
-    if !queue.waiting.is_empty() {
-        heading.push(Span::styled(
-            format!(" · {} waiting", queue.waiting.len()),
-            attention,
-        ));
-    }
+    let rows = usize::from(area.height - fixed);
+    let mut lines = vec![Line::default()];
     if let Some(estimate) = queue.est_free_ms {
-        heading.push(Span::styled(
-            format!(" · clear in {}", crate::queue::clear_in_text(estimate)),
+        lines.push(Line::from(Span::styled(
+            format!("All clear in {}", crate::queue::clear_in_text(estimate)),
             dim,
-        ));
+        )));
     }
-    let mut lines = vec![Line::default(), Line::from(heading)];
 
     let shown = if jobs > rows { rows.saturating_sub(1) } else { rows };
     let name_width = 24;
@@ -4388,10 +4386,8 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
         terminal.draw(|frame| render(frame, &app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer());
-        assert!(
-            rendered.contains("Heavy jobs · 1 running · 1 waiting · clear in ~3m"),
-            "{rendered}"
-        );
+        assert!(rendered.contains("All clear in ~3m"), "{rendered}");
+        assert!(!rendered.contains("Heavy jobs"), "{rendered}");
         let running = rendered.find("Running").expect(&rendered);
         let waiting = rendered.find("Waiting").expect(&rendered);
         let composer = rendered.find("describe a task").expect(&rendered);
@@ -4403,7 +4399,7 @@ mod tests {
         app.queue.as_mut().unwrap().running.clear();
         app.queue.as_mut().unwrap().waiting.clear();
         terminal.draw(|frame| render(frame, &app)).unwrap();
-        assert!(!buffer_text(terminal.backend().buffer()).contains("Heavy jobs"));
+        assert!(!buffer_text(terminal.backend().buffer()).contains("All clear"));
     }
 
     #[test]
@@ -4420,7 +4416,7 @@ mod tests {
 
         let mut small = Terminal::new(TestBackend::new(110, 14)).unwrap();
         small.draw(|frame| render(frame, &app)).unwrap();
-        assert!(!buffer_text(small.backend().buffer()).contains("Heavy jobs"));
+        assert!(!buffer_text(small.backend().buffer()).contains("Running"));
     }
 
     fn session(name: &str, state: SessionState) -> AgentSession {
