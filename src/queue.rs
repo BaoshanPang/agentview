@@ -29,6 +29,8 @@ pub struct Queue {
     pub running: Vec<RunningJob>,
     #[serde(default)]
     pub waiting: Vec<WaitingJob>,
+    /// Guess at how long until the queue is empty, from how long the same jobs took before.
+    pub est_free_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
@@ -68,6 +70,15 @@ impl RunningJob {
 impl WaitingJob {
     pub fn name(&self) -> &str {
         self.label.as_deref().unwrap_or(&self.cmd)
+    }
+
+    /// What the job's status column says: Waiting, unless the machine is the holdup.
+    pub fn status_text(&self) -> &'static str {
+        match self.reason.as_str() {
+            "ram" => "Low RAM",
+            "cpu" => "CPU busy",
+            _ => "Waiting",
+        }
     }
 
     /// Why the job is still in line, in words.
@@ -176,11 +187,16 @@ pub fn duration_text(milliseconds: u64) -> String {
     }
 }
 
-pub fn memory_text(megabytes: u64) -> String {
-    if megabytes >= 1024 {
-        format!("{:.1} GB", megabytes as f64 / 1024.0)
-    } else {
-        format!("{megabytes} MB")
+/// `~30s`, `~3m`, `~1h05m`: how long until the queue is expected to be empty.
+pub fn clear_in_text(milliseconds: u64) -> String {
+    let seconds = milliseconds / 1000;
+    if seconds < 90 {
+        return format!("~{}s", (seconds + 2) / 5 * 5).replace("~0s", "~5s");
+    }
+    let minutes = (seconds + 30) / 60;
+    match minutes {
+        0..=59 => format!("~{minutes}m"),
+        _ => format!("~{}h{:02}m", minutes / 60, minutes % 60),
     }
 }
 
@@ -217,8 +233,10 @@ mod tests {
         assert_eq!(duration_text(48_000), "48s");
         assert_eq!(duration_text(252_000), "4m12s");
         assert_eq!(duration_text(3_900_000), "1h05m");
-        assert_eq!(memory_text(512), "512 MB");
-        assert_eq!(memory_text(2150), "2.1 GB");
+        assert_eq!(clear_in_text(500), "~5s");
+        assert_eq!(clear_in_text(28_000), "~30s");
+        assert_eq!(clear_in_text(95_000), "~2m");
+        assert_eq!(clear_in_text(3_900_000), "~1h05m");
     }
 
     #[test]

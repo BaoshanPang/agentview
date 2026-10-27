@@ -95,9 +95,10 @@ own interface.
 - **Subscription usage at a glance:** two concise header lines show Claude and
   Codex rate-limit windows, resets, and pace when space allows. `/usage` shows the full breakdown.
 - **Heavy-job queue:** with [agent-bouncer](https://github.com/moritzWa/agent-bouncer)
-  installed, the header shows `queue 2/2 slots · 2 waiting`, a session whose
-  build or test run is stuck in line says `#1 in line for cargo test`, and
-  `/queue` lists what is running and what waits. agentview only reads the queue.
+  installed, a panel above the input lists the builds and test runs that are
+  running or waiting, with how long each has been at it and when the queue
+  should clear. A session whose own run is stuck in line says
+  `#1 in line for cargo test`. agentview only reads the queue.
 - **`Ctrl+X` twice** stops and hides or deletes a session, no dialog.
 
 ### Refresh time by harness

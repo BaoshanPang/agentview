@@ -54,11 +54,20 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         _ => 3,
     };
     let header_height = if area.height < 16 { 2 } else { 4 };
+    let queue_height = if app.overlay == Overlay::None {
+        let spare = area
+            .height
+            .saturating_sub(header_height + composer_height + 1 + MIN_LIST_ROWS);
+        queue_panel_height(app, spare)
+    } else {
+        0
+    };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(header_height),
             Constraint::Min(1),
+            Constraint::Length(queue_height),
             Constraint::Length(composer_height),
             Constraint::Length(1),
         ])
@@ -66,8 +75,9 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 
     render_header(frame, app, chunks[0]);
     render_session_list(frame, app, chunks[1]);
-    render_bottom_panel(frame, app, chunks[2]);
-    render_footer(frame, app, chunks[3]);
+    render_queue_panel(frame, app, chunks[2]);
+    render_bottom_panel(frame, app, chunks[3]);
+    render_footer(frame, app, chunks[4]);
 
     if let Overlay::Confirm(target) = &app.overlay {
         render_confirmation(frame, app, target, area);
@@ -83,8 +93,6 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
         render_migration_target_picker(frame, app, area);
     } else if app.overlay == Overlay::Usage {
         render_usage_popup(frame, app, area);
-    } else if app.overlay == Overlay::Queue {
-        render_queue_popup(frame, app, area);
     }
 }
 
@@ -177,41 +185,93 @@ fn render_header(frame: &mut Frame<'_>, app: &App, area: Rect) {
         area,
     );
     render_usage(frame, app, area);
-    render_queue_summary(frame, app, area);
 }
 
-/// `2/3 slots · 1 waiting` beside the title while the job queue has anything in it.
-fn render_queue_summary(frame: &mut Frame<'_>, app: &App, area: Rect) {
+/// Session rows the list always keeps, so the job panel never squeezes it out.
+const MIN_LIST_ROWS: u16 = 10;
+const QUEUE_PANEL_JOB_ROWS: usize = 6;
+
+/// A blank line, a heading and one row per job, as many as `spare` lines allow.
+fn queue_panel_height(app: &App, spare: u16) -> u16 {
     let Some(queue) = app.queue.as_ref().filter(|queue| !queue.is_idle()) else {
+        return 0;
+    };
+    if spare < 3 {
+        return 0;
+    }
+    let jobs = queue.running.len() + queue.waiting.len();
+    let rows = jobs.min(QUEUE_PANEL_JOB_ROWS).min(usize::from(spare) - 2);
+    2 + rows as u16
+}
+
+fn render_queue_panel(frame: &mut Frame<'_>, app: &App, area: Rect) {
+    let Some(queue) = app.queue.as_ref().filter(|_| area.height >= 3) else {
         return;
     };
-    if area.height <= 2 || area.width < 70 {
-        return;
-    }
-    let title = format!("agentview v{}", env!("CARGO_PKG_VERSION"));
-    let x = area.x + 9 + display_width(&title) as u16 + 3;
-    let mut spans = vec![Span::styled(
-        format!("queue {}/{} slots", queue.slots_in_use, queue.slots_total),
-        Style::default().fg(palette().dim),
+    let now = crate::queue::now_ms();
+    let dim = Style::default().fg(palette().dim);
+    let attention = Style::default().fg(palette().attention);
+    let jobs = queue.running.len() + queue.waiting.len();
+    let rows = usize::from(area.height) - 2;
+
+    let mut heading = vec![Span::styled(
+        "Heavy jobs",
+        Style::default().add_modifier(Modifier::BOLD),
     )];
+    heading.push(Span::styled(format!(" · {} running", queue.running.len()), dim));
     if !queue.waiting.is_empty() {
-        spans.push(Span::styled(
+        heading.push(Span::styled(
             format!(" · {} waiting", queue.waiting.len()),
-            Style::default().fg(palette().attention),
+            attention,
         ));
     }
-    let width = area.x + area.width.saturating_sub(x);
-    if width < 12 {
-        return;
+    if let Some(estimate) = queue.est_free_ms {
+        heading.push(Span::styled(
+            format!(" · clear in {}", crate::queue::clear_in_text(estimate)),
+            dim,
+        ));
+    }
+    let mut lines = vec![Line::default(), Line::from(heading)];
+
+    let shown = if jobs > rows { rows.saturating_sub(1) } else { rows };
+    let name_width = 24;
+    let folder = |cwd: &str| {
+        let parts: Vec<_> = std::path::Path::new(cwd)
+            .components()
+            .filter_map(|part| part.as_os_str().to_str())
+            .filter(|part| *part != "/")
+            .collect();
+        parts[parts.len().saturating_sub(2)..].join("/")
+    };
+    let row = |status: &str, style: Style, since_ms: u64, name: &str, cwd: &str| {
+        Line::from(vec![
+            Span::styled(format!("{status:<9}"), style),
+            Span::styled(
+                format!("{:>5}  ", crate::queue::duration_text(now.saturating_sub(since_ms))),
+                dim,
+            ),
+            Span::raw(pad_to_width(truncate(name, name_width), name_width)),
+            Span::styled(format!("  {}", truncate(&folder(cwd), 24)), dim),
+        ])
+    };
+    let running = queue
+        .running
+        .iter()
+        .map(|job| row("Running", Style::default().fg(palette().fg), job.started_ms, job.name(), &job.cwd));
+    let waiting = queue
+        .waiting
+        .iter()
+        .map(|job| row(job.status_text(), attention, job.since_ms, job.name(), &job.cwd));
+    lines.extend(running.chain(waiting).take(shown));
+    if jobs > shown {
+        lines.push(Line::from(Span::styled(
+            format!("+{} more", jobs - shown),
+            dim,
+        )));
     }
     frame.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(palette().bg)),
-        Rect {
-            x,
-            y: area.y,
-            width,
-            height: 1,
-        },
+        Paragraph::new(lines).style(Style::default().bg(palette().bg).fg(palette().fg)),
+        area,
     );
 }
 
@@ -1297,101 +1357,6 @@ fn render_usage_popup(frame: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
-fn render_queue_popup(frame: &mut Frame<'_>, app: &App, area: Rect) {
-    let Some(queue) = app.queue.as_ref() else {
-        return;
-    };
-    let now = crate::queue::now_ms();
-    let dim = Style::default().fg(palette().dim);
-    let heading = Style::default()
-        .fg(palette().fg)
-        .add_modifier(Modifier::BOLD);
-    let mut machine = vec![format!("{}/{} slots in use", queue.slots_in_use, queue.slots_total)];
-    if let Some(free) = queue.avail_gb {
-        machine.push(format!("free RAM {free:.1} GB"));
-    }
-    if let Some(swap) = queue.swap_gb {
-        machine.push(format!("swap {swap:.1} GB"));
-    }
-    let name_width = queue
-        .running
-        .iter()
-        .map(|job| display_width(job.name()))
-        .chain(queue.waiting.iter().map(|job| display_width(job.name())))
-        .max()
-        .unwrap_or(0)
-        .clamp(12, 34);
-    let folder = |cwd: &str| abbreviate_path(std::path::Path::new(cwd));
-    let mut lines = vec![Line::from(machine.join("   ")), Line::default()];
-    if queue.is_idle() {
-        lines.push(Line::from(Span::styled("nothing running, nobody waiting", dim)));
-    }
-    if !queue.running.is_empty() {
-        lines.push(Line::from(Span::styled("running", heading)));
-        for job in &queue.running {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(
-                        "  {:>7}  {:>7}  ",
-                        crate::queue::duration_text(now.saturating_sub(job.started_ms)),
-                        crate::queue::memory_text(job.rss_mb)
-                    ),
-                    dim,
-                ),
-                Span::raw(pad_to_width(truncate(job.name(), name_width), name_width)),
-                Span::styled(format!("  {}", truncate(&folder(&job.cwd), 36)), dim),
-            ]));
-        }
-        lines.push(Line::default());
-    }
-    if !queue.waiting.is_empty() {
-        lines.push(Line::from(Span::styled("waiting, first come first served", heading)));
-        for (index, job) in queue.waiting.iter().enumerate() {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(
-                        "  {}. {:>5}  {:<16}  ",
-                        index + 1,
-                        crate::queue::duration_text(now.saturating_sub(job.since_ms)),
-                        job.reason_text()
-                    ),
-                    Style::default().fg(palette().attention),
-                ),
-                Span::raw(pad_to_width(truncate(job.name(), name_width), name_width)),
-                Span::styled(format!("  {}", truncate(&folder(&job.cwd), 36)), dim),
-            ]));
-        }
-        lines.push(Line::default());
-    }
-    lines.push(Line::from(Span::styled(
-        "run jobs with agent-bouncer run --wait -- <command> · any key closes",
-        dim,
-    )));
-    let padding = Padding::new(3, 3, 1, 1);
-    let content_width = lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 2 + 6;
-    let popup_width = content_width.min(area.width.saturating_sub(2)).max(28);
-    let popup_height = (lines.len() as u16 + 2 + 2).min(area.height.saturating_sub(2));
-    let popup = Rect::new(
-        area.x + area.width.saturating_sub(popup_width) / 2,
-        area.y + area.height.saturating_sub(popup_height) / 2,
-        popup_width,
-        popup_height,
-    );
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .title(" job queue ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette().accent))
-                    .padding(padding),
-            )
-            .style(Style::default().bg(palette().bg).fg(palette().fg)),
-        popup,
-    );
-}
-
 /// The header marks capped history with a trailing plus on the done count.
 fn is_history_cap_warning(warning: &str) -> bool {
     warning.contains("history is limited")
@@ -1490,7 +1455,7 @@ fn contextual_footer(app: &App, width: u16) -> String {
         Overlay::Peek if app.input.is_empty() => "enter to open".into(),
         Overlay::Peek => "enter to send · esc to close".into(),
         Overlay::Help => "? to close help · esc also closes".into(),
-        Overlay::Usage | Overlay::Queue => "any key to close".into(),
+        Overlay::Usage => "any key to close".into(),
         Overlay::None if matches!(app.selection, Some(SelectionKey::ShowMore(_))) => {
             if width >= 55 {
                 "enter to show more · ↑/↓ to select · ? for shortcuts".into()
@@ -1711,7 +1676,6 @@ fn help_sections(app: &App) -> Vec<HelpSection> {
             ("/login", "open native setup"),
             ("/migrate", "copy selected to another harness"),
             ("/usage", "subscription limits and resets"),
-            ("/queue", "heavy jobs running and waiting"),
         ],
     });
     sections
@@ -4416,28 +4380,47 @@ mod tests {
     }
 
     #[test]
-    fn the_header_and_popup_show_the_queue() {
+    fn the_job_panel_sits_above_the_composer_and_lists_every_job() {
         let mut app = App::new(SessionSnapshot::default());
-        app.queue = Some(busy_queue());
-        let mut terminal = Terminal::new(TestBackend::new(110, 24)).unwrap();
+        let mut queue = busy_queue();
+        queue.est_free_ms = Some(190_000);
+        app.queue = Some(queue);
+        let mut terminal = Terminal::new(TestBackend::new(110, 30)).unwrap();
         terminal.draw(|frame| render(frame, &app)).unwrap();
         let rendered = buffer_text(terminal.backend().buffer());
-        assert!(rendered.contains("queue 2/2 slots · 1 waiting"), "{rendered}");
-
-        app.queue.as_mut().unwrap().waiting.clear();
-        app.queue.as_mut().unwrap().running.clear();
-        terminal.draw(|frame| render(frame, &app)).unwrap();
-        assert!(!buffer_text(terminal.backend().buffer()).contains("queue 2/2"));
-
-        app.queue = Some(busy_queue());
-        app.overlay = Overlay::Queue;
-        terminal.draw(|frame| render(frame, &app)).unwrap();
-        let rendered = buffer_text(terminal.backend().buffer());
-        assert!(rendered.contains("job queue"), "{rendered}");
+        assert!(
+            rendered.contains("Heavy jobs · 1 running · 1 waiting · clear in ~3m"),
+            "{rendered}"
+        );
+        let running = rendered.find("Running").expect(&rendered);
+        let waiting = rendered.find("Waiting").expect(&rendered);
+        let composer = rendered.find("describe a task").expect(&rendered);
+        assert!(running < waiting && waiting < composer, "{rendered}");
         assert!(rendered.contains("cargo test"), "{rendered}");
-        assert!(rendered.contains("1. "), "{rendered}");
         assert!(rendered.contains("e2e"), "{rendered}");
-        assert!(rendered.contains("all slots in use"), "{rendered}");
+        assert!(!rendered.contains("swap"), "{rendered}");
+
+        app.queue.as_mut().unwrap().running.clear();
+        app.queue.as_mut().unwrap().waiting.clear();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        assert!(!buffer_text(terminal.backend().buffer()).contains("Heavy jobs"));
+    }
+
+    #[test]
+    fn a_long_queue_is_cut_to_what_fits_and_says_how_many_more() {
+        let mut app = App::new(SessionSnapshot::default());
+        let mut queue = busy_queue();
+        let job = queue.waiting[0].clone();
+        queue.waiting = vec![job; 9];
+        app.queue = Some(queue);
+        let mut terminal = Terminal::new(TestBackend::new(110, 40)).unwrap();
+        terminal.draw(|frame| render(frame, &app)).unwrap();
+        let rendered = buffer_text(terminal.backend().buffer());
+        assert!(rendered.contains("+5 more"), "{rendered}");
+
+        let mut small = Terminal::new(TestBackend::new(110, 14)).unwrap();
+        small.draw(|frame| render(frame, &app)).unwrap();
+        assert!(!buffer_text(small.backend().buffer()).contains("Heavy jobs"));
     }
 
     fn session(name: &str, state: SessionState) -> AgentSession {

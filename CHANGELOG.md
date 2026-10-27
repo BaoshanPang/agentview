@@ -11,9 +11,9 @@ and released versions are intended to follow Semantic Versioning.
 ### Added
 
 - When [agent-bouncer](https://github.com/moritzWa/agent-bouncer) is installed,
-  the header shows its job queue (`queue 2/2 slots · 2 waiting`), a Working
-  session whose tool call waits in line reads `#1 in line for <job>`, and
-  `/queue` opens the running and waiting jobs.
+  a panel above the input lists its running and waiting heavy jobs and when the
+  queue should clear, and a Working session whose tool call waits in line reads
+  `#1 in line for <job>`.
 
 - Ctrl+B keeps the model and switches who serves it, from the session list or
   the new-task composer: OpenCode's `anthropic/claude-opus-5-5` becomes

@@ -1917,7 +1917,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> AppAction {
     if key.kind == KeyEventKind::Release {
         return AppAction::None;
     }
-    if matches!(app.overlay, Overlay::Usage | Overlay::Queue) {
+    if app.overlay == Overlay::Usage {
         app.overlay = Overlay::None;
         return AppAction::None;
     }
@@ -3626,26 +3626,6 @@ mod tests {
         handle_key(&mut app, control_key('r'));
         assert_eq!(app.overlay, Overlay::Help);
         assert!(app.input.is_empty());
-    }
-
-    #[test]
-    fn queue_command_opens_a_popup_that_any_key_closes() {
-        let mut app = app();
-        let type_command = |app: &mut App| {
-            for character in "/queue".chars() {
-                handle_key(app, key(KeyCode::Char(character)));
-            }
-            handle_key(app, key(KeyCode::Enter));
-        };
-        type_command(&mut app);
-        assert_eq!(app.overlay, Overlay::None);
-        assert!(app.notice.as_deref().is_some_and(|notice| notice.contains("no job queue")));
-
-        app.queue = Some(crate::queue::Queue::default());
-        type_command(&mut app);
-        assert_eq!(app.overlay, Overlay::Queue);
-        assert_eq!(handle_key(&mut app, key(KeyCode::Esc)), AppAction::None);
-        assert_eq!(app.overlay, Overlay::None);
     }
 
     #[test]

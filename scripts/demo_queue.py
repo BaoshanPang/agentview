@@ -30,10 +30,7 @@ OUTPUT_DIR = REPO / "target/demo"
 
 # (VHS command, badge keys, badge caption, seconds to wait afterwards).
 STEPS = [
-    ("Sleep", None, None, 3.6),
-    ('Type "/queue"', None, None, 0.4),
-    ("Enter", ["enter"], "job queue", 5.4),
-    ("Escape", ["esc"], "close", 14.0),
+    ("Sleep", None, None, 24.0),
 ]
 
 # Jobs started through agent-bouncer: (label, folder under the demo work dir, seconds, delay before queueing).
@@ -63,6 +60,16 @@ def write_fixture(path: Path, work: Path) -> None:
             session["cwd"] = str(work / "shop-api/docs")
     document["demo"]["restorable"] = []
     path.write_text(json.dumps(document))
+
+
+def seed_history(bouncer_dir: Path) -> None:
+    """Past runs of each job, so the queue can say when it expects to clear."""
+    bouncer_dir.mkdir(parents=True, exist_ok=True)
+    lines = [
+        json.dumps({"ts": 1, "ev": "finish", "job": f"past-{index}", "label": label, "dur_ms": seconds * 1000})
+        for index, (label, _, seconds, _) in enumerate(JOBS)
+    ]
+    (bouncer_dir / "events.jsonl").write_text("\n".join(lines) + "\n")
 
 
 def tape(env: dict[str, str], fixture: Path, work: Path, go: Path, mp4: Path) -> str:
@@ -156,6 +163,7 @@ def main() -> None:
         }
         fixture = temp / "fixture.json"
         write_fixture(fixture, work)
+        seed_history(temp / "bouncer")
         go = temp / "go"
         raw = temp / "raw.mp4"
         tape_path = temp / "queue.tape"
@@ -178,9 +186,9 @@ def main() -> None:
             label = f"v{index}"
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         mp4 = OUTPUT_DIR / "queue.mp4"
+        graph = ["-filter_complex", ";".join(filters), "-map", f"[{label}]"] if filters else []
         demo.run(
-            "ffmpeg", "-y", "-loglevel", "error", "-i", raw, *inputs,
-            "-filter_complex", ";".join(filters), "-map", f"[{label}]",
+            "ffmpeg", "-y", "-loglevel", "error", "-i", raw, *inputs, *graph,
             "-c:v", "libx264", "-crf", "16", "-pix_fmt", "yuv420p", mp4,
         )
 

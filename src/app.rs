@@ -54,7 +54,6 @@ const DASHBOARD_COMMANDS: &[&str] = &[
     "/filter",
     "/migrate",
     "/usage",
-    "/queue",
 ];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -62,7 +61,6 @@ pub enum Overlay {
     None,
     Help,
     Usage,
-    Queue,
     Peek,
     HarnessPicker,
     ModelPicker,
@@ -737,7 +735,7 @@ impl App {
 
     pub fn activate(&mut self) -> AppAction {
         match self.overlay.clone() {
-            Overlay::Help | Overlay::Usage | Overlay::Queue => {
+            Overlay::Help | Overlay::Usage => {
                 self.overlay = Overlay::None;
                 AppAction::None
             }
@@ -3137,13 +3135,6 @@ impl App {
             "/usage" => {
                 self.notice = None;
                 self.overlay = Overlay::Usage;
-            }
-            "/queue" if self.queue.is_none() => self.set_notice(
-                "no job queue found; agentview shows agent-bouncer's when it is installed",
-            ),
-            "/queue" => {
-                self.notice = None;
-                self.overlay = Overlay::Queue;
             }
             "/filter" => {
                 self.set_filter(argument);
