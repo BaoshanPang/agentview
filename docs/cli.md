@@ -471,6 +471,12 @@ Requirements and behavior:
   backgrounded SSH client like any local session. Harnesses without a native
   remote attach (including the Terminal harness and launch) are refused with a
   notice, and inline reply/interrupt stay local-only.
+- OpenCode jumps in attach through the host's own agentview
+  (`agentview opencode attach`), so the TUI connects to that supervisor's
+  server: turns typed there show as Working on both dashboards and idle ones
+  as Completed. A direct TUI would run on its own server instance whose state
+  managed discovery cannot see. Hosts running an older agentview reject the
+  subcommand and fall back to the direct TUI.
 - `space` fetches a remote OpenCode session's full transcript for Peek from
   the host (`opencode export` into a temp file, since that CLI truncates a
   piped export at 64 KiB); the newest messages are kept. Claude and Codex

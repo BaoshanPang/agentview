@@ -161,6 +161,16 @@ enum SessionCommand {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 enum OpenCodeCommand {
+    /// Attach one TUI to the session on this agentview's own OpenCode server,
+    /// replacing this process, so turns stay visible to managed discovery.
+    /// Sessions this agentview does not manage need `--cwd`.
+    Attach {
+        #[arg(value_name = "SESSION_ID")]
+        session_id: String,
+        /// Workspace for sessions this agentview does not manage.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+    },
     /// Start one managed OpenCode session in the background: the supervisor
     /// creates it on its own server, records ownership, and submits the task.
     /// Prints the created session as JSON.
@@ -1234,6 +1244,29 @@ fn ssh_targets(cli: &Cli) -> Result<Vec<String>> {
 
 fn run_opencode_command(command: &OpenCodeCommand, cli: &Cli) -> Result<()> {
     match command {
+        OpenCodeCommand::Attach { session_id, cwd } => {
+            let supervisor = OpenCodeSupervisor::host(cli.opencode_bin.clone())?;
+            let mut command = match supervisor.native_attach_command(session_id) {
+                Ok(command) => command,
+                Err(error) => match cwd {
+                    Some(cwd) => supervisor
+                        .native_attach_command_for_external(session_id, cwd)
+                        .context("this agentview does not manage that session")?,
+                    None => return Err(error).context(
+                        "this agentview does not manage that session; pass --cwd to attach anyway",
+                    ),
+                },
+            };
+            // Hand the terminal to the TUI and wait, so the ssh PTY keeps
+            // working and the exit status reaches the caller.
+            let status = command
+                .status()
+                .context("failed to attach to the session")?;
+            if !status.success() {
+                bail!("the OpenCode session exited with status {status}");
+            }
+            Ok(())
+        }
         OpenCodeCommand::Launch { prompt, cwd, model } => {
             let session = OpenCodeSupervisor::host(cli.opencode_bin.clone())?
                 .launch_with_model(prompt, cwd, model.as_deref())?;

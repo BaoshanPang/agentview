@@ -10,6 +10,14 @@ and released versions are intended to follow Semantic Versioning.
 
 ### Added
 
+- `agentview opencode attach SESSION_ID [--cwd DIR]` attaches one TUI to the
+  session on this agentview's own OpenCode server, replacing the process.
+- Jumping into a remote OpenCode session attaches through the host's agentview
+  supervisor, so turns typed in that TUI show as Working on both dashboards;
+  a direct TUI would run on its own server instance whose state managed
+  discovery cannot see. Hosts without the subcommand fall back to the direct
+  TUI.
+
 - `space` on a remote OpenCode row fetches the session's full transcript for
   Peek from the host over SSH. The export lands in a temp file first because
   `opencode export` truncates a piped export at 64 KiB, and a bounded tail of
