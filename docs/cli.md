@@ -64,6 +64,8 @@ agentview is already up to date.
 | `--openhands-bin PATH` / `--no-host-openhands` | Select or disable OpenHands native control plus bounded event-store discovery. |
 | `--docker-container NAME_OR_ID` | Observe Claude and Codex in one explicitly selected running container; repeatable. |
 | `--docker-bin PATH` | Use a particular Docker executable; default `docker`. |
+| `--ssh-host HOST` | Observe sessions on a passwordless SSH host that runs agentview; repeatable. The host list is remembered in the state directory after the first run. |
+| `--ssh-bin PATH` | Use a particular SSH client for `--ssh-host` targets; default `ssh`. |
 | `--session-migrate-bin PATH` | Use a particular session-migrate executable for `ctrl+m` moves and `/migrate`; default `session-migrate`. |
 | `--harness` / `--launch-provider claude\|codex\|pi\|omp\|opencode\|cursor\|copilot\|antigravity\|mistral-vibe\|muse\|qwen\|kimi\|grok\|kilo\|openhands\|terminal` | Initial harness for new-session prompts; default Claude. Each configured coding harness opens its native full-screen UI; Terminal opens the user's shell. `oh-my-pi` and `kilo-code` are accepted aliases. |
 | `--launch-cwd PATH` | Working directory for newly launched host sessions; default current directory. |
@@ -370,6 +372,21 @@ as ineligible. agentview does not call deletion an archive.
 
 ## Restarting the OpenCode server
 
+### Starting a managed session from the command line
+
+```console
+agentview opencode launch "fix the flaky test" --cwd ~/work/repo
+agentview opencode launch "fix the flaky test" --cwd ~/work/repo --model anthropic/claude-opus-5-5
+```
+
+The supervisor creates the session on its own server, records ownership before
+the turn starts, and submits the task. The created session prints as JSON. This
+is the same launch path the dashboard composer uses, so the session is managed:
+it shows Completed when idle, restarts resume it, and it can be opened,
+replied to, and interrupted from any dashboard that owns it.
+
+### Restarting the server
+
 agentview runs one OpenCode server that its attached OpenCode sessions use.
 Restarting it, for example to pick up a new OpenCode build, normally cuts off
 every turn in flight. This command restarts it and resumes those turns:
@@ -423,6 +440,61 @@ before this feature existed keeps running until you close it. Shared windows
 need a server whose `/tui/select-session` accepts `client`; agentview reads the
 server's `/doc` to check, because older servers accept the field and then
 switch every attached window.
+
+## SSH host targets
+
+`agentview --ssh-host HOST` observes the sessions another machine runs through
+its own agentview. One refresh runs `agentview --json` on that host over SSH
+and merges the result into the dashboard, so every provider installed there
+appears once, tagged with its host:
+
+```console
+agentview --ssh-host 176
+agentview --ssh-host 176 --ssh-host 177
+```
+
+Inside the dashboard, `/remote` lists the watched hosts and
+`/remote add HOST` / `/remote remove HOST` change the set without a restart;
+the change persists to `~/.local/state/agentview/ssh-targets.json` immediately.
+
+Requirements and behavior:
+
+- The host must be reachable non-interactively (`BatchMode`): keys set up with
+  `ssh-copy-id`, no passphrase prompt. Anything else fails fast as a dashboard
+  warning; the rest of the dashboard is unaffected.
+- agentview must be installed on the remote host and on its PATH for
+  non-interactive shells (`~/.local/bin` is probed).
+- Remote rows are tagged with the host and Peek shows it as their runtime.
+  `Enter` jumps in: the dashboard suspends, agentview runs the provider's own
+  attach/resume on that host over SSH (`claude attach`/`--resume`,
+  `opencode --session`, `codex resume`), and `Enter`/`Right` resumes a
+  backgrounded SSH client like any local session. Harnesses without a native
+  remote attach (including the Terminal harness and launch) are refused with a
+  notice, and inline reply/interrupt stay local-only.
+- New sessions can start on a watched host: `ctrl+o` (and the directory view)
+  offers each host's known folders as `[host] /path`; picking one and
+  submitting a task hands the terminal to that harness on the host —
+  Claude and Codex receive the task as their argument, and OpenCode's task is
+  typed into its editor the moment the host's screen shows it accepting
+  input, exactly as a local native launch. Model picks and `--yolo`
+  permission bypass stay local-only.
+- OpenCode sessions with a task start through the host's own agentview
+  supervisor (`agentview opencode launch` over SSH), so they are managed
+  there: Completed when idle, and controllable from the host's dashboard too.
+  The host must run an agentview that has the subcommand; older ones fall
+  back to the interactive TUI launch.
+- The host list is persisted to
+  `~/.local/state/agentview/ssh-targets.json` after the first
+  `--ssh-host` run or `/remote add`, so later plain `agentview` launches keep
+  watching those hosts. Remove a host with `/remote remove HOST` or by
+  deleting it from that file.
+- A host that is itself being observed (its agentview runs with
+  `AGENTVIEW_REMOTE=1`) observes nothing, so two machines pointing at each
+  other cannot fan out.
+- Remote commands export a PATH with the per-user agent homes
+  (`~/.local/bin`, `~/.opencode/bin`, `~/.npm-global/bin`, `~/.bun/bin`,
+  `~/bin`) because non-interactive shells miss them, and fall back to
+  `~/.tmp` for `TMPDIR` on hosts where `/tmp` is mounted noexec.
 
 ## Managed Docker lifecycle
 

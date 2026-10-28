@@ -45,7 +45,9 @@ const SHARED_CLIENT_RESELECT: Duration = Duration::from_millis(400);
 /// Quiet after the title changes, so the frame that set it has finished.
 const SHARED_CLIENT_SETTLE: Duration = Duration::from_millis(40);
 const MAX_RESTORABLE_SESSIONS: usize = 2_000;
-const OPENCODE_READY_MARKER: &str = "Ask anything";
+/// The empty OpenCode editor shows this once it accepts input; a launch
+/// submits its task only after it is on screen.
+pub const OPENCODE_READY_MARKER: &str = "Ask anything";
 
 type HolderProbe = Arc<dyn Fn() -> Vec<Holder> + Send + Sync>;
 
@@ -1655,6 +1657,7 @@ impl OpenCodeSource {
         match &self.runtime {
             Runtime::Host => "host".into(),
             Runtime::Docker { container_id, .. } => container_id.clone(),
+            Runtime::Ssh { host } => host.clone(),
         }
     }
 
@@ -2137,6 +2140,7 @@ fn normalize_record(record: OpenCodeRecord, runtime: Runtime) -> AgentSession {
     let runtime_id = match &runtime {
         Runtime::Host => "host",
         Runtime::Docker { container_id, .. } => container_id,
+        Runtime::Ssh { host } => host,
     };
     let capabilities = if runtime == Runtime::Host {
         BTreeSet::from([Capability::Inspect])

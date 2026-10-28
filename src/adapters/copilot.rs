@@ -1222,6 +1222,7 @@ fn normalize_copilot_session(session: CopilotSessionInfo, runtime: Runtime) -> A
     let runtime_id = match &runtime {
         Runtime::Host => "host",
         Runtime::Docker { container_id, .. } => container_id,
+        Runtime::Ssh { host } => host,
     };
     let fallback_name = session
         .cwd

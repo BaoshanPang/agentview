@@ -400,6 +400,7 @@ pub fn parse_antigravity_last_conversations(
         let runtime_id = match &runtime {
             Runtime::Host => "host",
             Runtime::Docker { container_id, .. } => container_id,
+            Runtime::Ssh { host } => host,
         };
         let workspace_name = cwd
             .file_name()

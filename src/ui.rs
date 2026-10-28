@@ -7,7 +7,7 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::app::{
-    display_directory, hidden_picker_rows_for_height, is_active_session_state, App, ComposerMode,
+    hidden_picker_rows_for_height, is_active_session_state, App, ComposerMode,
     ConfirmTarget, Overlay, SelectionKey, ViewMode, MIGRATION_PICKER_PAGE_SIZE,
     MODEL_PICKER_PAGE_SIZE,
 };
@@ -680,7 +680,13 @@ fn render_tree_session_row(
         + display_width(&right);
     let summary_width = (width as usize).saturating_sub(fixed).max(1);
     // Indent the status marker with its session, keeping later columns aligned.
-    let name = pad_to_width(truncate(&session.name, name_width), name_width);
+    // Remote sessions are tagged with their host so the list alone says where
+    // a row runs; Peek repeats the host as its runtime label.
+    let display_name = match &session.runtime {
+        crate::domain::Runtime::Ssh { host } => format!("[{host}] {}", session.name),
+        _ => session.name.clone(),
+    };
+    let name = pad_to_width(truncate(&display_name, name_width), name_width);
     let mut spans = vec![
         Span::styled(format!("{} {symbol} ", " ".repeat(indent)), symbol_style),
         Span::raw(name),
@@ -1690,6 +1696,7 @@ fn help_sections(app: &App) -> Vec<HelpSection> {
             ("/filter text", "filter sessions"),
             ("/restore", "bring back a hidden session"),
             ("/completed", "show or hide finished"),
+            ("/remote", "watch or drop SSH hosts"),
             ("/cd path", "start in any directory"),
             ("/harness name", "switch harness"),
             ("/model name", "pick model or Terminal shell"),
@@ -2143,7 +2150,6 @@ fn hidden_snippet_line(
 
 fn render_directory_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let choices = app.directory_choices();
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let popup_width = area.width.saturating_sub(2).min(84).max(30);
     let visible_rows = hidden_picker_rows_for_height(area.height);
     let result_rows = choices.len().clamp(1, visible_rows);
@@ -2188,9 +2194,9 @@ fn render_directory_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 .enumerate()
                 .skip(start)
                 .take(visible_rows)
-                .map(|(index, path)| {
+                .map(|(index, choice)| {
                     let selected = index == app.directory_selection;
-                    let label = sanitize_inline(&display_directory(path, home.as_deref()));
+                    let label = sanitize_inline(&choice.label);
                     let label = truncate(&label, inner_width.saturating_sub(3).max(1));
                     Line::from(format!(" {} {label}", if selected { "›" } else { " " })).style(
                         if selected {
@@ -2198,6 +2204,10 @@ fn render_directory_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
                                 .bg(palette().selected_bg)
                                 .fg(palette().selected_fg)
                                 .add_modifier(Modifier::BOLD)
+                        } else if choice.host.is_some() {
+                            // A folder on a watched SSH host starts the next
+                            // session there.
+                            Style::default().bg(palette().bg).fg(palette().dim)
                         } else {
                             Style::default().bg(palette().bg).fg(palette().fg)
                         },
@@ -2693,15 +2703,28 @@ fn sanitize_multiline(input: &str) -> String {
 }
 
 fn launch_directory_name(app: &App) -> String {
-    app.launch_directory()
-        .or_else(|| std::env::current_dir().ok())
-        .map(|path| {
-            path.file_name()
+    match app.launch_directory() {
+        Some(crate::app::LaunchDirectory::Remote { host, path }) => {
+            let name = path
+                .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.display().to_string())
-        })
-        .map(|name| sanitize_inline(&name))
-        .unwrap_or_else(|| "unknown directory".into())
+                .unwrap_or_else(|| path.display().to_string());
+            sanitize_inline(&format!("[{host}] {name}"))
+        }
+        other => other
+            .and_then(|directory| match directory {
+                crate::app::LaunchDirectory::Local(path) => Some(path),
+                crate::app::LaunchDirectory::Remote { .. } => None,
+            })
+            .or_else(|| std::env::current_dir().ok())
+            .map(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string())
+            })
+            .map(|name| sanitize_inline(&name))
+            .unwrap_or_else(|| "unknown directory".into()),
+    }
 }
 
 fn abbreviate_path(path: &std::path::Path) -> String {

@@ -87,7 +87,7 @@ struct OwnedSession {
 
 pub const MANAGED_RAW_STATE: &str = "managed_server";
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct ManagedOpenCodeSession {
     pub id: String,
     pub cwd: PathBuf,

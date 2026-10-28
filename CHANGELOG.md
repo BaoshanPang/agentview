@@ -10,6 +10,42 @@ and released versions are intended to follow Semantic Versioning.
 
 ### Added
 
+- `agentview opencode launch "task" --cwd DIR [--model M]` starts one managed
+  OpenCode session in the background through the supervisor's own server and
+  prints it as JSON — the same launch path the dashboard composer uses.
+- A remote OpenCode launch with a task goes through that host's agentview
+  supervisor, so the session is managed there: Completed when idle, and
+  visible as managed on both dashboards. Hosts running an agentview without
+  the subcommand fall back to the interactive TUI launch.
+
+- New sessions can start on a watched SSH host: `ctrl+o` and the directory
+  view offer each host's known folders as `[host] /path`, and submitting a
+  task hands the terminal to that harness on the host over SSH — Claude and
+  Codex receive the task as their argument, and OpenCode's task is typed into
+  its editor as soon as the remote screen shows it accepting input. Model
+  picks and `--yolo` stay local-only.
+
+- `/remote` in the dashboard lists the watched SSH hosts, and
+  `/remote add HOST` / `/remote remove HOST` change the set without a
+  restart. The list is read on every refresh and persisted to
+  `~/.local/state/agentview/ssh-targets.json` immediately; each host keeps
+  its own completed-history budget.
+
+- `Enter` jumps into a remote session: the dashboard suspends and agentview
+  runs the provider's own attach or resume on that host over SSH —
+  `claude attach`/`--resume`, `opencode --session`, and `codex resume` are
+  supported; other harnesses are refused with a notice. Remote commands
+  export the per-user agent CLI homes into PATH and fall back to `~/.tmp`
+  for `TMPDIR` on hosts where `/tmp` is mounted noexec.
+
+- `--ssh-host HOST` observes the sessions a passwordless SSH host runs through
+  its own agentview: each refresh runs `agentview --json` on that host and
+  merges the snapshot into the dashboard, with remote rows tagged with the
+  host and inspect-only. The host list is remembered in
+  `~/.local/state/agentview/ssh-targets.json`, and a host running under
+  `AGENTVIEW_REMOTE=1` observes nothing so two machines watching each other
+  cannot fan out.
+
 - When [agent-bouncer](https://github.com/moritzWa/agent-bouncer) is installed,
   a panel above the input lists its running and waiting heavy jobs and when the
   queue should clear, and a Working session whose tool call waits in line reads

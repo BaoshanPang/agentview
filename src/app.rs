@@ -51,6 +51,7 @@ const DASHBOARD_COMMANDS: &[&str] = &[
     "/setup",
     "/cd",
     "/completed",
+    "/remote",
     "/filter",
     "/migrate",
     "/usage",
@@ -69,6 +70,23 @@ pub enum Overlay {
     MigrationTargetPicker { session_id: String },
     Composer(ComposerMode),
     Confirm(ConfirmTarget),
+}
+
+/// Where the next new session starts: a local folder, or a folder on a
+/// watched SSH host, which launches the harness there over SSH.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LaunchDirectory {
+    Local(PathBuf),
+    Remote { host: String, path: PathBuf },
+}
+
+/// One folder offered by the folder picker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectoryChoice {
+    pub label: String,
+    pub path: PathBuf,
+    /// `None` for a local folder; the SSH host name otherwise.
+    pub host: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -127,6 +145,9 @@ pub enum AppAction {
     SetCompletedVisibility {
         include_completed: bool,
     },
+    /// `/remote add` or `/remote remove` changed the watched SSH hosts; the
+    /// next refresh discovers the new set.
+    RemoteHostsChanged,
     LoadModels {
         provider: Provider,
     },
@@ -152,6 +173,9 @@ pub enum AppAction {
         prompt: String,
         /// Directory picked in the directory view; `None` uses the launch cwd.
         cwd: Option<PathBuf>,
+        /// When set, the session starts on that SSH host and `cwd` is a path
+        /// there.
+        host: Option<String>,
     },
     Reply {
         session_id: String,
@@ -249,10 +273,15 @@ pub struct App {
     pub remembered_models: BTreeMap<Provider, String>,
     /// Ctrl+B is waiting for the model catalog before it switches providers.
     pending_provider_switch: bool,
-    /// Directory chosen with `/cd` for the next new session. It wins over the
-    /// directory view selection and is cleared once a session launches there.
-    pub launch_directory_override: Option<PathBuf>,
+    /// Directory chosen with `/cd` or the folder picker for the next new
+    /// session. It wins over the directory view selection and is cleared once
+    /// a session launches there. A remote choice starts the session on that
+    /// SSH host.
+    pub launch_directory_override: Option<LaunchDirectory>,
     pub directory_candidates: Vec<PathBuf>,
+    /// Folders known on watched SSH hosts, offered by the folder picker next
+    /// to the local ones. Cleared for the move picker, which stays local.
+    pub remote_directory_candidates: Vec<(String, PathBuf)>,
     pub directory_filter: String,
     pub directory_selection: usize,
     /// Escape returns to the new-task draft when the picker was opened from it.
@@ -326,6 +355,10 @@ pub struct App {
     pub usage: Vec<crate::usage::Usage>,
     /// The agent-bouncer queue, when that tool is installed.
     pub queue: Option<crate::queue::Queue>,
+    /// Watched SSH hosts, shared with the discovery source so `/remote` takes
+    /// effect on the next refresh. Empty and frozen until the dashboard
+    /// installs the real list.
+    pub ssh_targets: crate::adapters::SshTargetList,
 }
 
 impl App {
@@ -379,6 +412,7 @@ impl App {
             pending_provider_switch: false,
             launch_directory_override: None,
             directory_candidates: Vec::new(),
+            remote_directory_candidates: Vec::new(),
             directory_filter: String::new(),
             directory_selection: 0,
             directory_picker_from_composer: false,
@@ -434,6 +468,7 @@ impl App {
             color_scheme: ColorScheme::Dark,
             usage: Vec::new(),
             queue: None,
+            ssh_targets: crate::adapters::SshTargetList::disabled(),
         };
         app.rebuild_snapshot_cache();
         app.reconcile_selection();
@@ -713,24 +748,34 @@ impl App {
     }
 
     /// The project directory selected in the directory view, which the header
-    /// shows and new sessions start in.
-    pub fn launch_directory(&self) -> Option<PathBuf> {
+    /// shows and new sessions start in. A selection on a watched SSH host
+    /// starts the next session there.
+    pub fn launch_directory(&self) -> Option<LaunchDirectory> {
         if let Some(directory) = &self.launch_directory_override {
             return Some(directory.clone());
         }
         if self.view_mode != ViewMode::Directory {
             return None;
         }
-        self.selected_session()
-            .map(|session| project_group_path(&session.cwd))
+        let session = self
+            .selected_session()
+            .cloned()
             .or_else(|| {
                 self.selected_group().and_then(|group| {
                     group
                         .sessions
                         .first()
-                        .map(|index| project_group_path(&self.snapshot.sessions[*index].cwd))
+                        .map(|index| self.snapshot.sessions[*index].clone())
                 })
-            })
+            })?;
+        let path = project_group_path(&session.cwd);
+        Some(match &session.runtime {
+            crate::domain::Runtime::Ssh { host } => LaunchDirectory::Remote {
+                host: host.clone(),
+                path,
+            },
+            _ => LaunchDirectory::Local(path),
+        })
     }
 
     pub fn activate(&mut self) -> AppAction {
@@ -3084,13 +3129,21 @@ impl App {
                 self.pasted = pasted;
                 return self.open_model_picker();
             }
-            let cwd = self.launch_directory();
+            let launch_directory = self.launch_directory();
+            let (cwd, host) = match &launch_directory {
+                Some(LaunchDirectory::Remote { host, path }) => {
+                    (Some(path.clone()), Some(host.clone()))
+                }
+                Some(LaunchDirectory::Local(path)) => (Some(path.clone()), None),
+                None => (None, None),
+            };
             self.launch_directory_override = None;
             return AppAction::Launch {
                 provider: self.launch_provider.clone(),
                 model: self.launch_model.clone(),
                 prompt: pasted.expand(&input),
                 cwd,
+                host,
             };
         }
         let (command, argument) = input
@@ -3125,6 +3178,7 @@ impl App {
             },
             "/cd" => self.select_launch_directory(argument),
             "/completed" => return self.select_completed_visibility(argument),
+            "/remote" => return self.manage_remote_hosts(argument),
             // Alternative to ctrl+g, which multiplexers such as Zellij bind
             // to their own lock mode before agentview can see it.
             "/hidden" | "/restore" => return AppAction::BrowseHidden,
@@ -3179,6 +3233,10 @@ impl App {
         } else {
             match self
                 .launch_directory()
+                .and_then(|directory| match directory {
+                    LaunchDirectory::Local(base) => Some(base),
+                    LaunchDirectory::Remote { .. } => None,
+                })
                 .or_else(|| std::env::current_dir().ok())
             {
                 Some(base) => base.join(path),
@@ -3188,7 +3246,7 @@ impl App {
         match path.canonicalize() {
             Ok(directory) if directory.is_dir() => {
                 self.set_notice(format!("next session starts in {}", directory.display()));
-                self.launch_directory_override = Some(directory);
+                self.launch_directory_override = Some(LaunchDirectory::Local(directory));
             }
             _ => self.set_notice(format!("{} is not an existing directory", path.display())),
         }
@@ -3201,6 +3259,22 @@ impl App {
     pub fn open_directory_picker(&mut self) {
         let home = std::env::var_os("HOME").map(PathBuf::from);
         self.directory_candidates = directory_candidates(&self.snapshot.sessions, home.as_deref());
+        // Folders on the watched SSH hosts, most recent first: the snapshot
+        // is already sorted by recency, so keep its order and deduplicate.
+        let mut remote = self
+            .snapshot
+            .sessions
+            .iter()
+            .filter_map(|session| match &session.runtime {
+                crate::domain::Runtime::Ssh { host } => {
+                    Some((host.clone(), project_group_path(&session.cwd)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut seen = BTreeSet::new();
+        remote.retain(|pair| seen.insert(pair.clone()));
+        self.remote_directory_candidates = remote;
         self.directory_filter.clear();
         self.directory_selection = 0;
         self.directory_picker_from_composer =
@@ -3233,13 +3307,15 @@ impl App {
         }
         let session_id = session.id.clone();
         self.open_directory_picker();
+        self.remote_directory_candidates.clear();
         self.moving_session = Some(session_id);
     }
 
     /// Candidates matching the search. A typed absolute or `~` path that
     /// names an existing folder is offered first even when it is not a known
-    /// candidate.
-    pub fn directory_choices(&self) -> Vec<PathBuf> {
+    /// candidate. Local folders come first, then the folders of watched SSH
+    /// hosts.
+    pub fn directory_choices(&self) -> Vec<DirectoryChoice> {
         let filter = self.directory_filter.trim();
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let typed = expand_typed_directory(filter, home.as_deref()).filter(|path| path.is_dir());
@@ -3248,7 +3324,10 @@ impl App {
             .split_whitespace()
             .map(str::to_owned)
             .collect::<Vec<_>>();
-        let matches = self
+        let matches_filter = |label: &str| {
+            terms.iter().all(|term| label.to_lowercase().contains(term.as_str()))
+        };
+        let mut choices = self
             .directory_candidates
             .iter()
             .filter(|path| typed.as_ref() != Some(*path))
@@ -3256,8 +3335,36 @@ impl App {
                 let label = display_directory(path, home.as_deref()).to_lowercase();
                 terms.iter().all(|term| label.contains(term.as_str()))
             })
-            .cloned();
-        typed.clone().into_iter().chain(matches).collect()
+            .map(|path| DirectoryChoice {
+                label: display_directory(path, home.as_deref()),
+                path: path.clone(),
+                host: None,
+            })
+            .collect::<Vec<_>>();
+        if let Some(typed) = typed {
+            choices.insert(
+                0,
+                DirectoryChoice {
+                    label: display_directory(&typed, home.as_deref()),
+                    path: typed,
+                    host: None,
+                },
+            );
+        }
+        choices.extend(
+            self.remote_directory_candidates
+                .iter()
+                .filter(|(host, path)| {
+                    let label = remote_directory_label(host, path);
+                    matches_filter(&label)
+                })
+                .map(|(host, path)| DirectoryChoice {
+                    label: remote_directory_label(host, path),
+                    path: path.clone(),
+                    host: Some(host.clone()),
+                }),
+        );
+        choices
     }
 
     pub fn move_directory_selection(&mut self, delta: isize) {
@@ -3282,24 +3389,42 @@ impl App {
     }
 
     fn confirm_directory_selection(&mut self) -> AppAction {
-        let Some(directory) = self
+        let Some(choice) = self
             .directory_choices()
             .get(self.directory_selection)
             .cloned()
         else {
             return AppAction::None;
         };
-        let directory = directory.canonicalize().unwrap_or(directory);
         if let Some(session_id) = self.moving_session.clone() {
-            return self.confirm_move(session_id, directory);
+            if choice.host.is_some() {
+                self.set_notice("moving currently supports host sessions only");
+                return AppAction::None;
+            }
+            return self.confirm_move(session_id, choice.path);
         }
         let from_composer = self.directory_picker_from_composer;
+        let directory = match choice.host {
+            Some(host) => LaunchDirectory::Remote {
+                host,
+                path: choice.path,
+            },
+            None => LaunchDirectory::Local(choice.path.canonicalize().unwrap_or(choice.path)),
+        };
+        self.set_notice(match &directory {
+            LaunchDirectory::Remote { host, path } => {
+                format!("next session starts on {host} in {}", path.display())
+            }
+            LaunchDirectory::Local(directory) => {
+                format!("next session starts in {}", directory.display())
+            }
+        });
         self.launch_directory_override = Some(directory);
         self.directory_filter.clear();
         self.directory_candidates.clear();
+        self.remote_directory_candidates.clear();
         if from_composer {
             self.overlay = Overlay::Composer(ComposerMode::NewSession);
-            self.notice = None;
         } else {
             self.start_new_session(None);
         }
@@ -3445,6 +3570,64 @@ impl App {
             }
         };
         AppAction::SetCompletedVisibility { include_completed }
+    }
+
+    /// `/remote` lists the watched SSH hosts, `/remote add HOST` and
+    /// `/remote remove HOST` change the set. The change persists immediately
+    /// and the next refresh discovers the new set.
+    fn manage_remote_hosts(&mut self, argument: &str) -> AppAction {
+        let (verb, rest) = argument
+            .split_once(char::is_whitespace)
+            .map_or((argument, ""), |(verb, rest)| (verb, rest.trim()));
+        match verb.to_ascii_lowercase().as_str() {
+            "" | "list" => {
+                let hosts = self.ssh_targets.hosts();
+                self.set_notice(if hosts.is_empty() {
+                    "no remote hosts; add one with /remote add HOST".into()
+                } else {
+                    format!(
+                        "watching {}",
+                        hosts
+                            .iter()
+                            .map(|host| format!("{host} (ssh)"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                });
+            }
+            "add" => {
+                if rest.is_empty() {
+                    self.set_notice("use /remote add HOST");
+                    return AppAction::None;
+                }
+                match self.ssh_targets.insert(rest) {
+                    Ok(true) => {
+                        self.set_notice(format!(
+                            "{rest} (ssh) added; it appears on the next refresh"
+                        ));
+                        return AppAction::RemoteHostsChanged;
+                    }
+                    Ok(false) => self.set_notice(format!("{rest} (ssh) is already watched")),
+                    Err(error) => self.set_notice(format!("{error:#}")),
+                }
+            }
+            "remove" | "rm" => {
+                if rest.is_empty() {
+                    self.set_notice("use /remote remove HOST");
+                    return AppAction::None;
+                }
+                match self.ssh_targets.remove(rest) {
+                    Ok(true) => {
+                        self.set_notice(format!("{rest} (ssh) removed; gone on the next refresh"));
+                        return AppAction::RemoteHostsChanged;
+                    }
+                    Ok(false) => self.set_notice(format!("{rest} is not a watched host")),
+                    Err(error) => self.set_notice(format!("{error:#}")),
+                }
+            }
+            _ => self.set_notice("use /remote, /remote add HOST, or /remote remove HOST"),
+        }
+        AppAction::None
     }
 
     fn reconcile_model_selection(&mut self) {
@@ -3644,6 +3827,12 @@ pub fn display_directory(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
+/// A remote folder keeps its absolute remote path and names its host, since
+/// the local HOME abbreviation does not apply there.
+pub(crate) fn remote_directory_label(host: &str, path: &std::path::Path) -> String {
+    format!("[{host}] {}", path.display())
+}
+
 pub(crate) fn project_group_path(path: &std::path::Path) -> PathBuf {
     let components = path.components().collect::<Vec<_>>();
     let worktree_marker = components
@@ -3744,6 +3933,114 @@ mod tests {
             pull_requests: None,
             capabilities: BTreeSet::from([Capability::Inspect]),
         }
+    }
+
+    fn remote_session(id: &str, host: &str, cwd: &str, state: SessionState) -> AgentSession {
+        AgentSession {
+            runtime: Runtime::Ssh {
+                host: host.into(),
+            },
+            cwd: cwd.into(),
+            id: format!("ssh:{host}:{id}"),
+            ..session(id, state)
+        }
+    }
+
+    #[test]
+    fn the_folder_picker_offers_remote_folders_and_launches_on_that_host() {
+        let remote = remote_session(
+            "ses_one",
+            "176",
+            "/home/bpang/mywork/ns3",
+            SessionState::Completed,
+        );
+        let mut app = app_with(vec![remote, session("local", SessionState::Completed)]);
+        app.open_directory_picker();
+
+        let choices = app.directory_choices();
+        let remote_index = choices
+            .iter()
+            .position(|choice| choice.host.as_deref() == Some("176"))
+            .expect("remote folder in the picker");
+        assert_eq!(choices[remote_index].path, PathBuf::from("/home/bpang/mywork/ns3"));
+        assert!(choices[remote_index].label.starts_with("[176] "));
+        assert!(choices
+            .iter()
+            .all(|choice| choice.host.is_some() || choice.path != PathBuf::from("/home/bpang/mywork/ns3")));
+
+        app.directory_selection = remote_index;
+        assert_eq!(app.activate(), AppAction::None);
+        assert_eq!(
+            app.launch_directory_override,
+            Some(LaunchDirectory::Remote {
+                host: "176".into(),
+                path: PathBuf::from("/home/bpang/mywork/ns3"),
+            })
+        );
+
+        app.start_new_session(None);
+        app.input = "fix the sim".into();
+        assert_eq!(
+            app.activate(),
+            AppAction::Launch {
+                provider: Provider::Claude,
+                model: None,
+                prompt: "fix the sim".into(),
+                cwd: Some(PathBuf::from("/home/bpang/mywork/ns3")),
+                host: Some("176".into()),
+            }
+        );
+        assert_eq!(app.launch_directory_override, None);
+    }
+
+    #[test]
+    fn a_remote_directory_view_selection_starts_sessions_on_that_host() {
+        let remote = remote_session(
+            "ses_one",
+            "176",
+            "/home/bpang/mywork/ns3",
+            SessionState::Working,
+        );
+        let mut app = app_with(vec![remote]);
+        app.set_view_mode(ViewMode::Directory);
+        assert_eq!(
+            app.launch_directory(),
+            Some(LaunchDirectory::Remote {
+                host: "176".into(),
+                path: PathBuf::from("/home/bpang/mywork/ns3"),
+            })
+        );
+        app.start_new_session(None);
+        app.input = "build".into();
+        assert_eq!(
+            app.activate(),
+            AppAction::Launch {
+                provider: Provider::Claude,
+                model: None,
+                prompt: "build".into(),
+                cwd: Some(PathBuf::from("/home/bpang/mywork/ns3")),
+                host: Some("176".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn moving_a_session_offers_no_remote_folders() {
+        let remote = remote_session(
+            "ses_one",
+            "176",
+            "/home/bpang/mywork/ns3",
+            SessionState::Completed,
+        );
+        let mut app = app_with(vec![remote, session("local", SessionState::Completed)]);
+        app.select_and_reveal_session("local");
+        app.start_move();
+        assert!(app.moving_session.is_some());
+        assert!(app.remote_directory_candidates.is_empty());
+        assert!(app
+            .directory_choices()
+            .iter()
+            .all(|choice| choice.host.is_none()));
     }
 
     #[test]
@@ -5338,7 +5635,7 @@ mod tests {
         app.start_new_session(None);
         app.input = "/cd fresh".into();
         app.activate();
-        assert_eq!(app.launch_directory(), Some(fresh.clone()));
+        assert_eq!(app.launch_directory(), Some(LaunchDirectory::Local(fresh.clone())));
 
         app.start_new_session(None);
         app.input = "task".into();
@@ -5402,12 +5699,12 @@ mod tests {
         for character in "picker-target".chars() {
             app.push_input(character);
         }
-        assert_eq!(app.directory_choices(), vec![picked.clone()]);
+        assert_eq!(app.directory_choices(), vec![DirectoryChoice { label: display_directory(&picked, None), path: picked.clone(), host: None }]);
         assert_eq!(app.activate(), AppAction::None);
 
         assert_eq!(app.overlay, Overlay::Composer(ComposerMode::NewSession));
         assert_eq!(app.input, "fix the bug");
-        assert_eq!(app.launch_directory(), Some(picked.clone()));
+        assert_eq!(app.launch_directory(), Some(LaunchDirectory::Local(picked.clone())));
         assert!(matches!(
             app.activate(),
             AppAction::Launch { cwd: Some(cwd), .. } if cwd == picked
@@ -5437,10 +5734,10 @@ mod tests {
         for character in typed.display().to_string().chars() {
             app.push_input(character);
         }
-        assert_eq!(app.directory_choices().first(), Some(&typed));
+        assert_eq!(app.directory_choices().first().map(|choice| choice.path.clone()), Some(typed.clone()));
         app.activate();
         assert_eq!(app.overlay, Overlay::Composer(ComposerMode::NewSession));
-        assert_eq!(app.launch_directory(), Some(typed));
+        assert_eq!(app.launch_directory(), Some(LaunchDirectory::Local(typed)));
     }
 
     #[test]
@@ -5940,6 +6237,7 @@ mod tests {
                 model: None,
                 prompt: "build it".into(),
                 cwd: None,
+                host: None,
             }
         );
 
@@ -6291,6 +6589,7 @@ mod tests {
                 model: Some("opus".into()),
                 prompt: "ship it".into(),
                 cwd: None,
+                host: None,
             }
         );
 
@@ -6531,7 +6830,6 @@ mod tests {
     #[test]
     fn completed_command_requests_toggle_or_explicit_visibility_without_guessing() {
         let mut app = App::with_completed_visibility(SessionSnapshot::default(), false);
-
         app.start_new_session(None);
         app.input = "/completed".into();
         assert_eq!(
@@ -6559,6 +6857,110 @@ mod tests {
         app.input = "/completed sometimes".into();
         assert_eq!(app.activate(), AppAction::None);
         assert!(app.notice.as_deref().unwrap().contains("/completed show"));
+    }
+
+    #[test]
+    fn remote_command_lists_adds_and_removes_ssh_hosts() {
+        let mut app = App::new(SessionSnapshot::default());
+        app.start_new_session(None);
+        app.input = "/remote".into();
+        assert_eq!(app.activate(), AppAction::None);
+        assert!(app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("no remote hosts; add one with /remote add HOST"));
+
+        // A plain App has a frozen list, so changes are refused.
+        app.start_new_session(None);
+        app.input = "/remote add 177".into();
+        assert_eq!(app.activate(), AppAction::None);
+        assert!(app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("remote hosts are disabled"));
+
+        // An enabled list accepts adds, deduplicates, and persists them.
+        let directory = tempfile::tempdir().unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                directory.path(),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        let registry = directory.path().join("ssh-targets.json");
+        app.ssh_targets = crate::adapters::SshTargetList::enabled(Vec::new(), registry.clone());
+
+        app.start_new_session(None);
+        app.input = "/remote add 177".into();
+        assert_eq!(app.activate(), AppAction::RemoteHostsChanged);
+        assert!(app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("177 (ssh) added; it appears on the next refresh"));
+        assert_eq!(
+            crate::adapters::load_ssh_targets_at(&registry).unwrap().hosts,
+            ["177".to_owned()].into_iter().collect()
+        );
+
+        app.start_new_session(None);
+        app.input = "/remote add 177".into();
+        assert_eq!(app.activate(), AppAction::None);
+        assert!(app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("177 (ssh) is already watched"));
+
+        app.start_new_session(None);
+        app.input = "/remote".into();
+        assert_eq!(app.activate(), AppAction::None);
+        assert!(app.notice.as_deref().unwrap().contains("watching 177"));
+
+        app.start_new_session(None);
+        app.input = "/remote remove 177".into();
+        assert_eq!(app.activate(), AppAction::RemoteHostsChanged);
+        assert!(app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("177 (ssh) removed; gone on the next refresh"));
+        assert!(crate::adapters::load_ssh_targets_at(&registry)
+            .unwrap()
+            .hosts
+            .is_empty());
+
+        app.start_new_session(None);
+        app.input = "/remote remove 177".into();
+        assert_eq!(app.activate(), AppAction::None);
+        assert!(app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("177 is not a watched host"));
+
+        app.start_new_session(None);
+        app.input = "/remote update 177".into();
+        assert_eq!(app.activate(), AppAction::None);
+        assert!(app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("use /remote, /remote add HOST"));
+
+        app.start_new_session(None);
+        app.input = "/remote add not a host".into();
+        assert_eq!(app.activate(), AppAction::None);
+        assert!(app
+            .notice
+            .as_deref()
+            .unwrap()
+            .contains("SSH target contains unsupported characters"));
     }
 
     #[test]

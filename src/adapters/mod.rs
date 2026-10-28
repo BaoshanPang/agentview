@@ -24,6 +24,7 @@ mod pi;
 mod qwen;
 mod screen_status;
 mod session_migrate_native;
+pub(crate) mod ssh_remote;
 mod terminal_harness;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -83,12 +84,17 @@ pub use muse::{
 };
 pub use opencode::{
     default_opencode_ownership_path, parse_opencode_session_list, OpenCodeController,
-    OpenCodeInvocation, OpenCodeOwnership, OpenCodeSource,
+    OpenCodeInvocation, OpenCodeOwnership, OpenCodeSource, OPENCODE_READY_MARKER,
 };
 pub use pi::{default_pi_session_dir, parse_pi_session, PiController, PiSource};
 pub use qwen::{default_qwen_ownership_path, QwenController, QwenOwnership, QwenSource};
 pub use session_migrate_native::{
     SessionMigrateNativeController, SessionMigrateNativeOwnership, SessionMigrateNativeSource,
+};
+pub use ssh_remote::{
+    default_ssh_targets_path, load_ssh_targets, load_ssh_targets_at, save_ssh_targets,
+    save_ssh_targets_at, validate_host, SshHostSource, SshHostsSource, SshTargetList, SshTargets,
+    REMOTE_GUARD_ENV, REMOTE_PATH_PREFIX,
 };
 pub use terminal_harness::{is_shell_install_choice, shell_install_name, TerminalHarness};
 
@@ -407,7 +413,7 @@ fn deduplicate_sessions(sessions: &mut Vec<AgentSession>) {
     sessions.extend(unique.into_values());
 }
 
-fn bound_completed_history(
+pub(crate) fn bound_completed_history(
     sessions: &mut Vec<AgentSession>,
     kept: &std::collections::BTreeSet<String>,
     request: &DiscoveryRequest,

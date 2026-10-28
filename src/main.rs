@@ -13,11 +13,12 @@ use agentview::adapters::{
     ClaudeSource, CodexSource, CopilotController, CopilotOwnedSource, CopilotSource,
     CopilotSupervisor, CursorController, CursorHistorySource, DiscoveryEngine, DiscoveryRequest,
     DockerTarget, FixtureSource, KimiController, KimiOwnership, KimiSource,
-    ManagedDockerCreateSpec, ManagedDockerService, ManagedDockerStatus, MistralVibeController,
-    MistralVibeOwnership, MistralVibeSource, MuseController, MuseOwnership, MuseSource,
-    OpenCodeController, OpenCodeSource, PiController, PiSource, QwenController, QwenOwnership,
-    QwenSource, SessionMigrateNativeController, SessionMigrateNativeOwnership,
-    SessionMigrateNativeSource, TerminalHarness,
+    load_ssh_targets, ManagedDockerCreateSpec, ManagedDockerService, ManagedDockerStatus,
+    MistralVibeController, MistralVibeOwnership, MistralVibeSource, MuseController, MuseOwnership,
+    MuseSource, OpenCodeController, OpenCodeSource, PiController, PiSource, QwenController,
+    QwenOwnership, QwenSource, REMOTE_GUARD_ENV, save_ssh_targets, SshHostsSource, SshTargetList,
+    SessionMigrateNativeController, SessionMigrateNativeOwnership, SessionMigrateNativeSource,
+    TerminalHarness, validate_host, default_ssh_targets_path,
 };
 #[cfg(not(target_os = "linux"))]
 use agentview::adapters::{CursorOwnership, OpenCodeOwnership};
@@ -160,6 +161,19 @@ enum SessionCommand {
 
 #[derive(Clone, Debug, Eq, PartialEq, Subcommand)]
 enum OpenCodeCommand {
+    /// Start one managed OpenCode session in the background: the supervisor
+    /// creates it on its own server, records ownership, and submits the task.
+    /// Prints the created session as JSON.
+    Launch {
+        #[arg(value_name = "PROMPT")]
+        prompt: String,
+        /// Workspace the session starts in.
+        #[arg(long, value_name = "PATH")]
+        cwd: PathBuf,
+        /// OpenCode model in `provider/model` form.
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+    },
     /// Adopt explicitly verified existing V2 sessions from a private manifest.
     /// This does not start or resume any turns.
     HandoffImport { manifest: PathBuf },
@@ -442,6 +456,15 @@ struct Cli {
     #[arg(long = "docker-container", value_name = "NAME_OR_ID", global = true)]
     docker_containers: Vec<String>,
 
+    /// Observe sessions on a passwordless SSH host that runs agentview. The
+    /// host list is remembered in the state directory after the first run.
+    #[arg(long = "ssh-host", value_name = "HOST", global = true)]
+    ssh_hosts: Vec<String>,
+
+    /// SSH client used to reach `--ssh-host` targets.
+    #[arg(long, default_value = "ssh", value_name = "PATH", global = true)]
+    ssh_bin: String,
+
     /// Docker executable used for explicitly enrolled container targets.
     #[arg(long, default_value = "docker", value_name = "PATH", global = true)]
     docker_bin: String,
@@ -541,6 +564,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let request = discovery_request(&cli);
+    let ssh_hosts = ssh_targets(&cli)?;
     // Secure the shared state root before any provider supervisor creates a
     // child directory. With a conventional 0022 umask, create_dir_all on a
     // provider path would otherwise leave the common parent at 0755 and the
@@ -629,6 +653,7 @@ fn main() -> Result<()> {
         claude_bin: cli.claude_bin.clone(),
         codex_bin: cli.codex_bin.clone(),
         docker_bin: cli.docker_bin.clone(),
+        ssh_bin: cli.ssh_bin.clone(),
         launch_provider,
         launch_cwd: launch_cwd.clone(),
         provider_io_enabled,
@@ -891,6 +916,11 @@ fn main() -> Result<()> {
     }
 
     let mut engine = DiscoveryEngine::new();
+    let ssh_target_list = if cli.fixture.is_some() {
+        SshTargetList::disabled()
+    } else {
+        SshTargetList::enabled(ssh_hosts, default_ssh_targets_path()?)
+    };
     // Successful imports remain visible without broadening discovery to every
     // historical provider conversation.
     engine.add_source(migration_registry.clone());
@@ -1084,8 +1114,8 @@ fn main() -> Result<()> {
         if let Some(terminal_harness) = terminal_harness {
             engine.add_source(terminal_harness);
         }
-        for container in cli.docker_containers {
-            let target = DockerTarget::inspect(&container, &cli.docker_bin)?;
+        for container in &cli.docker_containers {
+            let target = DockerTarget::inspect(container, &cli.docker_bin)?;
             let display_image = target.display_image();
             engine.add_source(ClaudeSource::docker(
                 target.name.clone(),
@@ -1094,6 +1124,12 @@ fn main() -> Result<()> {
             ));
             engine.add_source(CodexSource::docker(target.name, target.id, display_image));
         }
+        // One source reads the host list on every refresh, so /remote add and
+        // /remote remove inside the dashboard change the next refresh.
+        engine.add_source(SshHostsSource::new(
+            ssh_target_list.clone(),
+            cli.ssh_bin.clone(),
+        ));
     }
     if cli.json {
         let mut snapshot = engine.discover(&request);
@@ -1133,6 +1169,7 @@ fn main() -> Result<()> {
         MigrationServices::new(migration_client, migration_registry),
         cli.theme,
         theme::resolve(cli.theme),
+        ssh_target_list,
     )?;
 
     Ok(())
@@ -1175,8 +1212,35 @@ fn discovery_request(cli: &Cli) -> DiscoveryRequest {
     }
 }
 
+/// SSH hosts this run observes: the persisted registry plus explicit
+/// `--ssh-host` flags, persisted back after a successful merge so awareness
+/// survives restarts. A host running under `AGENTVIEW_REMOTE=1` observes
+/// nothing itself, so a watched machine never fans out recursively.
+fn ssh_targets(cli: &Cli) -> Result<Vec<String>> {
+    if std::env::var_os(REMOTE_GUARD_ENV).is_some() {
+        return Ok(Vec::new());
+    }
+    for host in &cli.ssh_hosts {
+        validate_host(host).with_context(|| format!("invalid --ssh-host value {host}"))?;
+    }
+    let persisted = load_ssh_targets()?;
+    let mut hosts = persisted.hosts.clone();
+    hosts.extend(cli.ssh_hosts.iter().cloned());
+    if !cli.ssh_hosts.is_empty() {
+        save_ssh_targets(&hosts)?;
+    }
+    Ok(hosts.into_iter().collect())
+}
+
 fn run_opencode_command(command: &OpenCodeCommand, cli: &Cli) -> Result<()> {
     match command {
+        OpenCodeCommand::Launch { prompt, cwd, model } => {
+            let session = OpenCodeSupervisor::host(cli.opencode_bin.clone())?
+                .launch_with_model(prompt, cwd, model.as_deref())?;
+            serde_json::to_writer_pretty(io::stdout().lock(), &session)?;
+            println!();
+            Ok(())
+        }
         OpenCodeCommand::HandoffImport { manifest } => {
             let report =
                 OpenCodeSupervisor::host(cli.opencode_bin.clone())?.import_handoff(manifest)?;
@@ -1470,6 +1534,7 @@ fn run_completed_archive(
         claude_bin: cli.claude_bin.clone(),
         codex_bin: cli.codex_bin.clone(),
         docker_bin: cli.docker_bin.clone(),
+        ssh_bin: cli.ssh_bin.clone(),
         launch_provider: Provider::Codex,
         launch_cwd: std::env::current_dir()?,
         provider_io_enabled: true,

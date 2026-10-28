@@ -122,6 +122,12 @@ pub enum Runtime {
         container_name: String,
         image: String,
     },
+    /// A passwordless SSH host that runs its own agentview, whose snapshot
+    /// this dashboard merges. `Enter` hands the terminal to the provider's
+    /// own attach or resume on that host; other control stays local.
+    Ssh {
+        host: String,
+    },
 }
 
 /// How the provider reports the session's execution style.
@@ -139,6 +145,7 @@ impl Runtime {
         match self {
             Self::Host => "host",
             Self::Docker { container_name, .. } => container_name,
+            Self::Ssh { host } => host,
         }
     }
 }

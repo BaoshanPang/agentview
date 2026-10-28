@@ -72,6 +72,11 @@ own interface.
 - **Pause sessions you're waiting on** with `Ctrl+T`. They move into a Paused
   group that stays collapsed until you press `Enter` on it. Reorder rows with
   `Option+↑` / `↓`.
+- **Watch other machines in the same list** with `--ssh-host 176`: one refresh
+  runs agentview on that passwordless-SSH host and merges its sessions in,
+  tagged with the host name. `Enter` jumps into a remote session over SSH,
+  `ctrl+o` starts a new one in any of its folders — the typed task included —
+  and `/remote add` or `/remote remove` changes the set mid-session.
 - **Start in any folder** with `/cd` or `Ctrl+O` (`Cmd+O` in terminals that
   forward it, like Ghostty and kitty). Multi-line tasks and pastes
   stay one draft. A long paste shows as `[Pasted ~12 lines]` and `Ctrl+V`

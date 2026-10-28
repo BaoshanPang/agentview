@@ -20,7 +20,7 @@ use crate::domain::{
     SessionState,
 };
 use crate::migration::MigrationRegistry;
-use crate::process::{CommandRequest, CommandRunner, ProcessRunner};
+use crate::process::{CancellableProcessRunner, CommandOutput, CommandRequest, CommandRunner, ProcessRunner};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LaunchRequest {
@@ -108,6 +108,7 @@ pub struct ControlHubConfig {
     pub claude_bin: String,
     pub codex_bin: String,
     pub docker_bin: String,
+    pub ssh_bin: String,
     pub launch_provider: Provider,
     pub launch_cwd: PathBuf,
     pub provider_io_enabled: bool,
@@ -306,6 +307,7 @@ pub struct ControlHub {
     launch_cwd: PathBuf,
     provider_io_enabled: bool,
     yolo: bool,
+    ssh_bin: String,
     migration_registry: Option<MigrationRegistry>,
     /// A fixture's stand-in harnesses, models and past sessions.
     fixture_demo: Option<Arc<crate::adapters::FixtureDemo>>,
@@ -361,6 +363,7 @@ impl ControlHub {
             launch_cwd: config.launch_cwd,
             provider_io_enabled: config.provider_io_enabled,
             yolo: config.yolo,
+            ssh_bin: config.ssh_bin,
             migration_registry: None,
             fixture_demo: None,
         })
@@ -600,7 +603,7 @@ impl ControlHub {
     }
 
     pub fn launch(&self, prompt: String) -> Result<ControlOutcome> {
-        self.launch_with(self.launch_provider.clone(), None, prompt, None)
+        self.launch_with(self.launch_provider.clone(), None, prompt, None, None)
     }
 
     fn resolve_launch_cwd(&self, cwd: Option<PathBuf>) -> Result<PathBuf> {
@@ -622,7 +625,11 @@ impl ControlHub {
         model: Option<String>,
         prompt: String,
         cwd: Option<PathBuf>,
+        host: Option<String>,
     ) -> Result<ControlOutcome> {
+        if let Some(host) = host {
+            return self.launch_remote(provider, model, prompt, cwd, &host);
+        }
         self.ensure_provider_io()?;
         let controller = self.controller(&provider)?;
         let model = validate_model(model)?;
@@ -660,7 +667,11 @@ impl ControlHub {
         model: Option<String>,
         prompt: String,
         cwd: Option<PathBuf>,
+        host: Option<String>,
     ) -> Result<ControlOutcome> {
+        if let Some(host) = host {
+            return self.launch_remote(provider, model, prompt, cwd, &host);
+        }
         self.ensure_provider_io()?;
         let controller = self.controller(&provider)?;
         let model = validate_model(model)?;
@@ -689,6 +700,92 @@ impl ControlHub {
             controller.launch_foreground_yolo(&request)
         } else {
             controller.launch_foreground(&request)
+        }
+    }
+
+    /// Start a fresh provider session on a watched SSH host: hand the
+    /// terminal to the provider's own TUI there. Model picks and permission
+    /// bypass are local-only; the typed task is sent only by harnesses whose
+    /// CLI takes it as an argument (Claude and Codex).
+    fn launch_remote(
+        &self,
+        provider: Provider,
+        model: Option<String>,
+        prompt: String,
+        cwd: Option<PathBuf>,
+        host: &str,
+    ) -> Result<ControlOutcome> {
+        self.ensure_provider_io()?;
+        let program = match provider {
+            Provider::Claude => "claude",
+            Provider::OpenCode => "opencode",
+            Provider::Codex => "codex",
+            other => bail!("starting {} on {host} is not supported", other.label()),
+        };
+        if model.is_some() {
+            bail!(
+                "model selection is local-only; starting {program} on {host} uses its default model"
+            );
+        }
+        if self.yolo {
+            bail!(
+                "permission bypass is local-only; restart without --yolo to start sessions on {host}"
+            );
+        }
+        let label = provider.label();
+        // A remote OpenCode launch with a task goes through that host's own
+        // agentview supervisor, so the session is managed there: it shows as
+        // Completed when idle and both dashboards agree. Hosts running an
+        // agentview without the subcommand fall back to the interactive TUI.
+        if provider == Provider::OpenCode && !prompt.trim().is_empty() && cwd.is_some() {
+            let request =
+                remote_managed_launch_command(host, prompt.trim(), cwd.as_deref().unwrap(), &self.ssh_bin);
+            let output = CancellableProcessRunner::default().run(&request)?;
+            if output.status == 0 {
+                let (id, title) = parse_remote_managed_launch(&output.stdout)?;
+                return Ok(ControlOutcome {
+                    message: format!("started managed OpenCode session {title} on {host}"),
+                    provider_session_hint: Some(id),
+                });
+            }
+            if !managed_launch_unavailable(&output) {
+                bail!(
+                    "managed OpenCode launch on {host} failed: {}",
+                    output.stderr_lossy()
+                );
+            }
+        }
+        // OpenCode's positional is a project path and `--prompt` only
+        // pre-fills its editor, so the task is typed into the PTY once the
+        // empty editor is on screen — over SSH exactly as locally. Claude and
+        // Codex take the task as their first argument.
+        let exit = if provider == Provider::OpenCode && !prompt.trim().is_empty() {
+            let command = remote_launch_command(provider.clone(), "", cwd, host, &self.ssh_bin)?;
+            let initial_input = format!("\x1b[200~{}\x1b[201~\r", prompt.trim()).into_bytes();
+            crate::native_session::run_with_initial_input_after_screen(
+                command,
+                &format!("ssh:{host}:launch:{label}"),
+                &initial_input,
+                crate::adapters::OPENCODE_READY_MARKER,
+            )?
+        } else {
+            let command = remote_launch_command(provider.clone(), &prompt, cwd, host, &self.ssh_bin)?;
+            crate::native_session::run(command, &format!("ssh:{host}:launch:{label}"))?
+        };
+        match exit {
+            crate::native_session::NativeSessionExit::Backgrounded => Ok(ControlOutcome {
+                message: format!("backgrounded {label} on {host}"),
+                provider_session_hint: None,
+            }),
+            crate::native_session::NativeSessionExit::Exited(status) if status.success() => {
+                Ok(ControlOutcome {
+                    message: format!("returned from {label} on {host}"),
+                    provider_session_hint: None,
+                })
+            }
+            crate::native_session::NativeSessionExit::Exited(status) => {
+                bail!("{label} on {host} exited with status {status}")
+            }
         }
     }
 
@@ -758,6 +855,10 @@ impl ControlHub {
     pub fn open(&self, session: &AgentSession) -> Result<ControlOutcome> {
         PREVIEW_GENERATION.fetch_add(1, Ordering::SeqCst);
         self.ensure_provider_io()?;
+        if let Runtime::Ssh { .. } = &session.runtime {
+            let command = remote_open_command(session, &self.ssh_bin)?;
+            return run_interactive(command, session);
+        }
         let controller = self.controller(&session.provider)?;
         if self
             .migration_registry
@@ -1331,6 +1432,9 @@ impl ProviderController for ClaudeController {
                     short_claude_id(&session.provider_session_id),
                 ],
             ),
+            Runtime::Ssh { host } => {
+                bail!("Claude session runs on remote host {host}")
+            }
         };
         request.timeout = Duration::from_secs(8);
         read_command_output(&self.runner.run(&request)?, "Claude logs")
@@ -1395,6 +1499,9 @@ impl ProviderController for ClaudeController {
                     &short_claude_id(&session.provider_session_id),
                 ]);
                 run_interactive(command, session)
+            }
+            Runtime::Ssh { host } => {
+                bail!("Claude session runs on remote host {host}")
             }
         }
     }
@@ -1555,7 +1662,7 @@ impl ProviderController for CodexController {
     }
 
     fn inspect(&self, session: &AgentSession) -> Result<String> {
-        match session.runtime {
+        match &session.runtime {
             Runtime::Host => self
                 .supervisor
                 .as_ref()
@@ -1563,6 +1670,9 @@ impl ProviderController for CodexController {
                 .inspect(session),
             Runtime::Docker { .. } => {
                 bail!("Docker Codex transcript inspection is observe-only")
+            }
+            Runtime::Ssh { host } => {
+                bail!("Codex session runs on remote host {host}")
             }
         }
     }
@@ -1699,6 +1809,9 @@ impl ProviderController for CodexController {
                     &session.provider_session_id,
                 ]);
                 command
+            }
+            Runtime::Ssh { host } => {
+                bail!("Codex session runs on remote host {host}")
             }
         };
         if yolo {
@@ -1948,6 +2061,7 @@ fn runtime_key(runtime: &Runtime) -> String {
     match runtime {
         Runtime::Host => "host".into(),
         Runtime::Docker { container_id, .. } => format!("docker:{container_id}"),
+        Runtime::Ssh { host } => format!("ssh:{host}"),
     }
 }
 
@@ -2026,6 +2140,191 @@ fn parse_claude_model_aliases(help: &str) -> Result<Vec<String>> {
 
 fn short_claude_id(provider_session_id: &str) -> String {
     provider_session_id.chars().take(8).collect()
+}
+
+/// Build the SSH command that hands the terminal to one provider-native
+/// session on a remote host. The provider binary resolves through the same
+/// PATH augmentation discovery uses, the working directory is restored first,
+/// and every value is quoted because ssh joins the remote command into one
+/// shell line.
+fn remote_open_command(session: &AgentSession, ssh_bin: &str) -> Result<Command> {
+    let Runtime::Ssh { host } = &session.runtime else {
+        bail!("session is not on a remote SSH host");
+    };
+    let (program, arguments) = match &session.provider {
+        Provider::Claude => {
+            if session.raw_state.as_deref()
+                == Some(crate::adapters::claude_history::HISTORY_RAW_STATE)
+            {
+                // No process runs an ended session to attach to, and Claude
+                // finds a transcript only from the folder it was started in.
+                (
+                    "claude",
+                    vec![
+                        "--resume".to_string(),
+                        remote_shell_quote(&session.provider_session_id),
+                    ],
+                )
+            } else {
+                (
+                    "claude",
+                    vec![
+                        "attach".to_string(),
+                        remote_shell_quote(&short_claude_id(&session.provider_session_id)),
+                    ],
+                )
+            }
+        }
+        Provider::OpenCode => (
+            "opencode",
+            vec![
+                "--session".to_string(),
+                remote_shell_quote(&session.provider_session_id),
+            ],
+        ),
+        Provider::Codex => (
+            "codex",
+            vec![
+                "resume".to_string(),
+                remote_shell_quote(&session.provider_session_id),
+            ],
+        ),
+        other => bail!(
+            "jumping into a {} session on {host} is not supported; open it on the host",
+            other.label()
+        ),
+    };
+    // Values stay quoted; the PATH export resolves provider binaries the way
+    // a non-interactive remote shell cannot, and the TMPDIR export covers
+    // hosts whose /tmp is mounted noexec, where Bun-CLI renderers (OpenCode)
+    // cannot map their libraries from /tmp.
+    let remote = format!(
+        "mkdir -p \"$HOME/.tmp\"; export TMPDIR=\"${{TMPDIR:-$HOME/.tmp}}\"; {}; cd {} && {} {}",
+        crate::adapters::ssh_remote::REMOTE_PATH_PREFIX,
+        remote_shell_quote(&session.cwd.display().to_string()),
+        program,
+        arguments.join(" ")
+    );
+    Ok(ssh_interactive_command(host, remote, ssh_bin))
+}
+
+/// The SSH command that asks the remote host's own agentview to start one
+/// managed OpenCode session: created on the supervisor's server, ownership
+/// recorded before the turn starts, so the host's dashboard and this one both
+/// see it as a managed session.
+fn remote_managed_launch_command(
+    host: &str,
+    prompt: &str,
+    cwd: &std::path::Path,
+    ssh_bin: &str,
+) -> CommandRequest {
+    let remote = format!(
+        "mkdir -p \"$HOME/.tmp\"; export TMPDIR=\"${{TMPDIR:-$HOME/.tmp}}\"; {}; agentview opencode launch {} --cwd {}",
+        crate::adapters::ssh_remote::REMOTE_PATH_PREFIX,
+        remote_shell_quote(prompt),
+        remote_shell_quote(&cwd.display().to_string()),
+    );
+    let mut request = CommandRequest::new(
+        ssh_bin,
+        vec![
+            "-o".into(),
+            "BatchMode=yes".into(),
+            "-o".into(),
+            "ConnectTimeout=10".into(),
+            host.into(),
+            remote,
+        ],
+    );
+    request.timeout = Duration::from_secs(30);
+    request
+}
+
+/// `(provider session id, title)` from the remote launch's JSON output.
+fn parse_remote_managed_launch(stdout: &[u8]) -> Result<(String, String)> {
+    #[derive(serde::Deserialize)]
+    struct Created {
+        id: String,
+        #[serde(default)]
+        title: String,
+    }
+    let created: Created = serde_json::from_slice(stdout)
+        .context("the remote agentview launch returned no managed session")?;
+    Ok((created.id, created.title))
+}
+
+/// Whether the remote host's agentview cannot start managed sessions at all
+/// (an older agentview without the subcommand, or no agentview on PATH), which
+/// is worth a fallback rather than a failure.
+fn managed_launch_unavailable(output: &CommandOutput) -> bool {
+    output.status == 127
+        || output
+            .stderr_lossy()
+            .contains("unrecognized subcommand")
+}
+
+/// One interactive SSH command: force a remote PTY, never prompt, fail fast on
+/// unreachable hosts, and pass the whole remote command as one shell line.
+fn ssh_interactive_command(host: &str, remote: String, ssh_bin: &str) -> Command {
+    let mut command = Command::new(ssh_bin);
+    command.args([
+        "-t".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "ConnectTimeout=10".to_string(),
+        host.to_string(),
+        "--".to_string(),
+        remote,
+    ]);
+    command
+}
+
+/// The SSH command that starts a fresh provider TUI on a remote host: restore
+/// the chosen directory first, then start the harness. OpenCode's positional
+/// is a project path, not a task, so its typed draft is never auto-sent;
+/// Claude and Codex take the task as their first argument.
+fn remote_launch_command(
+    provider: Provider,
+    prompt: &str,
+    cwd: Option<PathBuf>,
+    host: &str,
+    ssh_bin: &str,
+) -> Result<Command> {
+    let program = match provider {
+        Provider::Claude => "claude",
+        Provider::OpenCode => "opencode",
+        Provider::Codex => "codex",
+        other => bail!("starting {} on {host} is not supported", other.label()),
+    };
+    let arguments = match provider {
+        Provider::OpenCode => Vec::new(),
+        _ if prompt.trim().is_empty() => Vec::new(),
+        _ => vec![remote_shell_quote(prompt.trim())],
+    };
+    let program_line = if arguments.is_empty() {
+        program.to_string()
+    } else {
+        format!("{} {}", program, arguments.join(" "))
+    };
+    let command_line = match cwd.as_deref() {
+        Some(directory) => format!(
+            "cd {} && {}",
+            remote_shell_quote(&directory.display().to_string()),
+            program_line
+        ),
+        None => program_line,
+    };
+    let remote = format!(
+        "mkdir -p \"$HOME/.tmp\"; export TMPDIR=\"${{TMPDIR:-$HOME/.tmp}}\"; {}; {}",
+        crate::adapters::ssh_remote::REMOTE_PATH_PREFIX,
+        command_line
+    );
+    Ok(ssh_interactive_command(host, remote, ssh_bin))
+}
+
+/// Quote one token for the remote shell that ssh hands the command to.
+fn remote_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn is_interruptible_claude_session(session: &AgentSession) -> bool {
@@ -2266,6 +2565,7 @@ mod tests {
             launch_cwd: PathBuf::from("/work"),
             provider_io_enabled: true,
             yolo: false,
+            ssh_bin: "ssh".into(),
             migration_registry: None,
             fixture_demo: None,
         };
@@ -2683,6 +2983,7 @@ exit 0
             launch_cwd: directory.path().into(),
             provider_io_enabled: false,
             yolo: false,
+            ssh_bin: "ssh".into(),
             migration_registry: None,
             fixture_demo: None,
         };
@@ -2740,6 +3041,7 @@ exit 0
             launch_cwd: PathBuf::from("/work"),
             provider_io_enabled: true,
             yolo: false,
+            ssh_bin: "ssh".into(),
             migration_registry: None,
             fixture_demo: None,
         }
@@ -3003,7 +3305,13 @@ exit 0
             }]
         );
         assert_eq!(
-            hub.launch_with(Provider::Pi, Some("custom".into()), "prompt".into(), None)
+            hub.launch_with(
+                Provider::Pi,
+                Some("custom".into()),
+                "prompt".into(),
+                None,
+                None,
+            )
                 .unwrap_err()
                 .to_string(),
             "Pi does not expose model selection"
@@ -3045,7 +3353,7 @@ exit 0
         .unwrap();
 
         let error = hub
-            .launch_with(Provider::Pi, None, "safe prompt".into(), None)
+            .launch_with(Provider::Pi, None, "safe prompt".into(), None, None)
             .unwrap_err()
             .to_string();
 
@@ -3126,5 +3434,240 @@ exit 0
             pull_requests: None,
             capabilities: BTreeSet::new(),
         }
+    }
+
+    fn remote_session(provider: Provider, raw_state: Option<&str>) -> AgentSession {
+        AgentSession {
+            runtime: Runtime::Ssh {
+                host: "176".into(),
+            },
+            provider,
+            provider_session_id: "11111111-2222-3333-4444-555555555555".into(),
+            raw_state: raw_state.map(str::to_owned),
+            cwd: PathBuf::from("/home/bpang/my work"),
+            ..session("11111111")
+        }
+    }
+
+    fn command_argv(command: &Command) -> Vec<String> {
+        #[cfg(unix)]
+        {
+            command
+                .get_args()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect()
+        }
+        #[cfg(not(unix))]
+        {
+            Vec::new()
+        }
+    }
+
+    fn remote_command_line(inner: &str) -> String {
+        format!(
+            "mkdir -p \"$HOME/.tmp\"; export TMPDIR=\"${{TMPDIR:-$HOME/.tmp}}\"; {}; {}",
+            crate::adapters::ssh_remote::REMOTE_PATH_PREFIX,
+            inner
+        )
+    }
+
+    #[test]
+    fn remote_open_attaches_a_live_claude_session_over_ssh() {
+        let command =
+            remote_open_command(&remote_session(Provider::Claude, Some("working")), "ssh")
+                .unwrap();
+        assert_eq!(command.get_program().to_string_lossy(), "ssh");
+        assert_eq!(
+            command_argv(&command),
+            vec![
+                "-t",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "176",
+                "--",
+                remote_command_line("cd '/home/bpang/my work' && claude attach '11111111'")
+                    .as_str(),
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_open_resumes_an_ended_claude_session() {
+        let command = remote_open_command(
+            &remote_session(
+                Provider::Claude,
+                Some(crate::adapters::claude_history::HISTORY_RAW_STATE),
+            ),
+            "ssh",
+        )
+        .unwrap();
+        let last = command_argv(&command).pop().unwrap();
+        assert_eq!(
+            last,
+            remote_command_line(
+                "cd '/home/bpang/my work' && claude --resume '11111111-2222-3333-4444-555555555555'"
+            )
+        );
+    }
+
+    #[test]
+    fn remote_open_resumes_opencode_and_codex_sessions() {
+        let session_id = "11111111-2222-3333-4444-555555555555";
+        let opencode =
+            remote_open_command(&remote_session(Provider::OpenCode, None), "ssh").unwrap();
+        assert_eq!(
+            command_argv(&opencode).pop().unwrap(),
+            remote_command_line(&format!(
+                "cd '/home/bpang/my work' && opencode --session '{session_id}'"
+            ))
+        );
+        let codex = remote_open_command(&remote_session(Provider::Codex, None), "ssh").unwrap();
+        assert_eq!(
+            command_argv(&codex).pop().unwrap(),
+            remote_command_line(&format!(
+                "cd '/home/bpang/my work' && codex resume '{session_id}'"
+            ))
+        );
+    }
+
+    #[test]
+    fn remote_open_refuses_unsupported_providers() {
+        let error = remote_open_command(&remote_session(Provider::Terminal, None), "ssh")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not supported"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn remote_shell_quote_survives_embedded_quotes() {
+        assert_eq!(remote_shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    fn launch_command_argv(
+        provider: Provider,
+        prompt: &str,
+        cwd: Option<PathBuf>,
+    ) -> Vec<String> {
+        let command = remote_launch_command(provider, prompt, cwd, "176", "ssh").unwrap();
+        command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn remote_launch_starts_claude_with_the_typed_task_in_the_picked_folder() {
+        let argv = launch_command_argv(
+            Provider::Claude,
+            "fix the sim",
+            Some(PathBuf::from("/home/bpang/my work")),
+        );
+        assert_eq!(argv.first().unwrap(), "-t");
+        assert_eq!(argv.get(5).unwrap(), "176");
+        let remote = argv.last().unwrap();
+        assert!(remote.starts_with("mkdir -p \"$HOME/.tmp\"; export TMPDIR="));
+        assert!(remote.contains("export PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:"));
+        assert!(remote.ends_with("cd '/home/bpang/my work' && claude 'fix the sim'"));
+    }
+
+    #[test]
+    fn remote_launch_opens_opencode_without_sending_the_task() {
+        let remote = launch_command_argv(Provider::OpenCode, "fix it", None)
+            .pop()
+            .unwrap();
+        assert!(remote.ends_with("opencode"), "{remote}");
+    }
+
+    #[test]
+    fn remote_launch_codex_sends_the_task_and_an_empty_prompt_starts_plain() {
+        let remote = launch_command_argv(Provider::Codex, "ship it", None)
+            .pop()
+            .unwrap();
+        assert!(remote.ends_with("codex 'ship it'"), "{remote}");
+        let remote = launch_command_argv(Provider::Claude, "   ", None)
+            .pop()
+            .unwrap();
+        assert!(remote.ends_with("claude"), "{remote}");
+    }
+
+    #[test]
+    fn remote_launch_refuses_unsupported_harnesses() {
+        let error = remote_launch_command(Provider::Terminal, "", None, "176", "ssh")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not supported"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn remote_managed_launch_asks_the_host_agentview_to_start_the_session() {
+        use std::path::Path;
+        let request = remote_managed_launch_command(
+            "176",
+            "check hostname",
+            Path::new("/home/bpang/my work"),
+            "ssh",
+        );
+        assert_eq!(request.program, "ssh");
+        assert_eq!(
+            request.args[..6],
+            [
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=10",
+                "176",
+                "mkdir -p \"$HOME/.tmp\"; export TMPDIR=\"${TMPDIR:-$HOME/.tmp}\"; export PATH=\"$HOME/.local/bin:$HOME/.opencode/bin:$HOME/.npm-global/bin:$HOME/.bun/bin:$HOME/bin:$PATH\"; agentview opencode launch 'check hostname' --cwd '/home/bpang/my work'"
+            ]
+        );
+        assert_eq!(request.timeout, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn remote_managed_launch_output_parses_to_id_and_title() {
+        let (id, title) = parse_remote_managed_launch(
+            br#"{
+  "id": "ses_new",
+  "cwd": "/work",
+  "title": "check hostname",
+  "summary": "check hostname",
+  "state": "working",
+  "raw_state": "managed_server",
+  "server_pid": 42,
+  "created_at_ms": 1,
+  "updated_at_ms": 2
+}"#,
+        )
+        .unwrap();
+        assert_eq!(id, "ses_new");
+        assert_eq!(title, "check hostname");
+        assert!(parse_remote_managed_launch(b"not json").is_err());
+    }
+
+    #[test]
+    fn only_an_older_agentview_falls_back_from_the_managed_launch() {
+        let unavailable = CommandOutput {
+            status: 2,
+            stdout: Vec::new(),
+            stderr: b"error: unrecognized subcommand 'launch'".to_vec(),
+        };
+        assert!(managed_launch_unavailable(&unavailable));
+        let missing = CommandOutput {
+            status: 127,
+            stdout: Vec::new(),
+            stderr: b"agentview: command not found".to_vec(),
+        };
+        assert!(managed_launch_unavailable(&missing));
+        let failed = CommandOutput {
+            status: 1,
+            stdout: Vec::new(),
+            stderr: b"the OpenCode launch prompt cannot be empty".to_vec(),
+        };
+        assert!(!managed_launch_unavailable(&failed));
     }
 }

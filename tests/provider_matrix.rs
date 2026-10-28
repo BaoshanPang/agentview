@@ -5,7 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use agentview::adapters::{
-    DiscoveryEngine, DiscoveryRequest, FixtureSource, OpenCodeSource, PiSource,
+    DiscoveryEngine, DiscoveryRequest, FixtureSource, OpenCodeSource, PiSource, SshHostSource,
 };
 use agentview::domain::Provider;
 use tempfile::tempdir;
@@ -41,6 +41,88 @@ fn pi_store() -> tempfile::TempDir {
     fs::create_dir(&nested).unwrap();
     fs::write(nested.join("session.jsonl"), PI_SESSION).unwrap();
     directory
+}
+
+/// A stand-in `ssh` executable that answers like a passwordless host whose
+/// agentview reports one managed OpenCode session.
+fn ssh_script() -> (tempfile::TempDir, PathBuf) {
+    let directory = tempdir().unwrap();
+    let executable = directory.path().join("ssh");
+    fs::write(
+        &executable,
+        r#"#!/bin/sh
+for argument in "$@"; do
+  case "$argument" in
+    176)
+      host=176
+      ;;
+    AGENTVIEW_REMOTE=1*)
+      ;;
+    *)
+      remote="$argument"
+      ;;
+  esac
+done
+[ "$host" = 176 ] || exit 66
+[ "${remote#*AGENTVIEW_REMOTE=1}" != "$remote" ] || exit 67
+printf '%s\n' "$remote" >&2
+cat <<'JSON'
+{
+  "sessions": [
+    {
+      "id": "opencode:host:ses_remote",
+      "provider_session_id": "ses_remote",
+      "provider": "opencode",
+      "runtime": {"kind": "host"},
+      "kind": "managed",
+      "name": "Remote build",
+      "cwd": "/home/bpang/mywork",
+      "state": "working",
+      "summary": "Compiling",
+      "raw_state": "managed_server",
+      "pid": 496692,
+      "started_at": 1793134692584,
+      "updated_at": 1793134809515,
+      "pull_requests": null,
+      "capabilities": ["inspect", "reply", "interrupt"]
+    }
+  ],
+  "warnings": []
+}
+JSON
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&executable).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&executable, permissions).unwrap();
+    (directory, executable)
+}
+
+#[test]
+fn ssh_host_merges_remote_agentview_sessions_as_inspect_only() {
+    let (_directory, ssh) = ssh_script();
+    let mut engine = DiscoveryEngine::new();
+    engine.add_source(SshHostSource::with_ssh_bin("176", ssh.display().to_string()));
+
+    let snapshot = engine.discover(&DiscoveryRequest::default());
+
+    assert!(snapshot.warnings.is_empty(), "{:?}", snapshot.warnings);
+    assert_eq!(snapshot.sessions.len(), 1);
+    let session = &snapshot.sessions[0];
+    assert_eq!(session.id, "ssh:176:opencode:host:ses_remote");
+    assert_eq!(session.provider, Provider::OpenCode);
+    assert_eq!(
+        session.runtime,
+        agentview::domain::Runtime::Ssh {
+            host: "176".into()
+        }
+    );
+    assert_eq!(session.pid, None);
+    assert_eq!(session.capabilities.len(), 1);
+    assert!(session
+        .capabilities
+        .contains(&agentview::domain::Capability::Inspect));
 }
 
 #[test]

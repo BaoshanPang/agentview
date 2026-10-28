@@ -247,6 +247,7 @@ fn normalize_record(record: ClaudeRecord, runtime: Runtime) -> AgentSession {
     let runtime_id = match &runtime {
         Runtime::Host => "host",
         Runtime::Docker { container_id, .. } => container_id,
+        Runtime::Ssh { host } => host,
     };
 
     AgentSession {

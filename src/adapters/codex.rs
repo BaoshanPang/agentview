@@ -444,6 +444,7 @@ fn normalize_thread(thread: CodexThread, runtime: Runtime) -> AgentSession {
     let runtime_id = match &runtime {
         Runtime::Host => "host",
         Runtime::Docker { container_id, .. } => container_id,
+        Runtime::Ssh { host } => host,
     };
     // The summary remains observable, but transcript/control capabilities are
     // granted only after the host supervisor proves exact ownership.
