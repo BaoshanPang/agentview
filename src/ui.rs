@@ -2171,7 +2171,7 @@ fn render_directory_picker(frame: &mut Frame<'_>, app: &App, area: Rect) {
         Span::styled(" search  ", Style::default().fg(palette().dim)),
         if app.directory_filter.is_empty() {
             Span::styled(
-                "type part of a folder name, or a path like ~/Code/app",
+                "type part of a folder name, a path like ~/Code/app, or host:/path on a watched SSH host",
                 Style::default().fg(palette().dim),
             )
         } else {

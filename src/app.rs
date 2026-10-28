@@ -3313,8 +3313,9 @@ impl App {
 
     /// Candidates matching the search. A typed absolute or `~` path that
     /// names an existing folder is offered first even when it is not a known
-    /// candidate. Local folders come first, then the folders of watched SSH
-    /// hosts.
+    /// candidate, and a typed `host:/path` for a watched SSH host offers that
+    /// folder on the host even when nothing has run in it yet. Local folders
+    /// come first, then the folders of watched SSH hosts.
     pub fn directory_choices(&self) -> Vec<DirectoryChoice> {
         let filter = self.directory_filter.trim();
         let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -3351,12 +3352,21 @@ impl App {
                 },
             );
         }
+        let typed_remote = typed_remote_choice(filter, &self.ssh_targets.hosts());
+        if let Some(typed_remote) = &typed_remote {
+            choices.insert(0, typed_remote.clone());
+        }
         choices.extend(
             self.remote_directory_candidates
                 .iter()
                 .filter(|(host, path)| {
                     let label = remote_directory_label(host, path);
                     matches_filter(&label)
+                })
+                .filter(|(host, path)| {
+                    !typed_remote.as_ref().is_some_and(|typed| {
+                        typed.host.as_deref() == Some(host.as_str()) && typed.path == *path
+                    })
                 })
                 .map(|(host, path)| DirectoryChoice {
                     label: remote_directory_label(host, path),
@@ -3833,6 +3843,30 @@ pub(crate) fn remote_directory_label(host: &str, path: &std::path::Path) -> Stri
     format!("[{host}] {}", path.display())
 }
 
+/// A typed `host:/path` for a watched SSH host, offered even when nothing has
+/// run in that folder yet: the local typed-path fast path can only offer
+/// folders that exist on this machine.
+fn typed_remote_choice(filter: &str, hosts: &BTreeSet<String>) -> Option<DirectoryChoice> {
+    let (host, path) = filter.split_once(':')?;
+    if !hosts.contains(host) {
+        return None;
+    }
+    let path = path.trim();
+    if !path.starts_with('/') {
+        return None;
+    }
+    let path = PathBuf::from(path.trim_end_matches('/'));
+    Some(DirectoryChoice {
+        label: remote_directory_label(host, &path),
+        path: if path.as_os_str().is_empty() {
+            PathBuf::from("/")
+        } else {
+            path
+        },
+        host: Some(host.to_owned()),
+    })
+}
+
 pub(crate) fn project_group_path(path: &std::path::Path) -> PathBuf {
     let components = path.components().collect::<Vec<_>>();
     let worktree_marker = components
@@ -4041,6 +4075,42 @@ mod tests {
             .directory_choices()
             .iter()
             .all(|choice| choice.host.is_none()));
+    }
+
+    #[test]
+    fn typing_host_path_offers_any_folder_on_a_watched_host() {
+        let mut app = app_with(vec![]);
+        app.ssh_targets = crate::adapters::SshTargetList::enabled(
+            vec!["176".into()],
+            std::env::temp_dir().join("agentview-test-unused.json"),
+        );
+        app.open_directory_picker();
+        app.directory_filter = "176:/extra".into();
+        app.directory_selection = 0;
+
+        let choices = app.directory_choices();
+        assert_eq!(
+            choices.first(),
+            Some(&DirectoryChoice {
+                label: "[176] /extra".into(),
+                path: PathBuf::from("/extra"),
+                host: Some("176".into()),
+            })
+        );
+
+        // Trailing slashes collapse and the root is accepted.
+        app.directory_filter = "176:/".into();
+        assert_eq!(app.directory_choices().first().unwrap().path, PathBuf::from("/"));
+
+        // Unwatched hosts and relative paths get nothing.
+        app.directory_filter = "999:/extra".into();
+        assert!(app.directory_choices().is_empty());
+        app.directory_filter = "176:extra".into();
+        assert!(app.directory_choices().is_empty());
+
+        // An unknown host prefix never becomes a local typed path either.
+        app.directory_filter = "999:/etc".into();
+        assert!(app.directory_choices().is_empty());
     }
 
     #[test]
