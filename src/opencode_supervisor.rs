@@ -2615,7 +2615,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-fn render_messages(value: &Value) -> Result<String> {
+pub(crate) fn render_messages(value: &Value) -> Result<String> {
     let messages = value
         .as_array()
         .context("OpenCode message endpoint did not return an array")?;

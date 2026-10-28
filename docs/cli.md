@@ -471,6 +471,10 @@ Requirements and behavior:
   backgrounded SSH client like any local session. Harnesses without a native
   remote attach (including the Terminal harness and launch) are refused with a
   notice, and inline reply/interrupt stay local-only.
+- `space` fetches a remote OpenCode session's full transcript for Peek from
+  the host (`opencode export` into a temp file, since that CLI truncates a
+  piped export at 64 KiB); the newest messages are kept. Claude and Codex
+  remote transcripts are not fetched yet.
 - New sessions can start on a watched host: `ctrl+o` (and the directory view)
   offers each host's known folders as `[host] /path`; picking one and
   submitting a task hands the terminal to that harness on the host —

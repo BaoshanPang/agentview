@@ -802,6 +802,9 @@ impl ControlHub {
         if !session.capabilities.contains(&Capability::Inspect) {
             bail!("inspection authority was not granted for this session");
         }
+        if let Runtime::Ssh { host } = &session.runtime {
+            return inspect_remote(session, host, &self.ssh_bin);
+        }
         self.controller(&session.provider)?.inspect(session)
     }
 
@@ -2327,6 +2330,88 @@ fn remote_shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+/// The SSH command that reads one OpenCode session's transcript on a remote
+/// host. `opencode export` truncates at 64 KiB when stdout is a pipe, so the
+/// export lands in a temp file first and a bounded tail is returned; the
+/// newest messages sit at the end.
+fn remote_inspect_command(session: &AgentSession, host: &str, ssh_bin: &str) -> Result<CommandRequest> {
+    if session.provider != Provider::OpenCode {
+        bail!(
+            "remote transcript inspection is not supported for {} yet; read it on {host}",
+            session.provider.label()
+        );
+    }
+    let file = "\"$HOME/.tmp/agentview-inspect.json\"";
+    let remote = format!(
+        "mkdir -p \"$HOME/.tmp\"; export TMPDIR=\"${{TMPDIR:-$HOME/.tmp}}\"; {}; \
+         opencode export {} > {file} && {{ size=$(wc -c < {file}); \
+         if [ \"$size\" -le 400000 ]; then cat {file}; else tail -c 400000 {file}; fi; }}; \
+         status=$?; rm -f {file}; exit $status",
+        crate::adapters::ssh_remote::REMOTE_PATH_PREFIX,
+        remote_shell_quote(&session.provider_session_id),
+    );
+    let mut request = CommandRequest::new(
+        ssh_bin,
+        vec![
+            "-o".into(),
+            "BatchMode=yes".into(),
+            "-o".into(),
+            "ConnectTimeout=10".into(),
+            host.into(),
+            remote,
+        ],
+    );
+    request.timeout = Duration::from_secs(60);
+    Ok(request)
+}
+
+/// Parse the remote export. A bounded tail of a larger export starts and ends
+/// mid-document, so the complete trailing messages are recovered by cutting at
+/// the message boundaries OpenCode's pretty printer emits. The salvage runs on
+/// the whole text: a tail fragment's first `{` usually sits inside a nested
+/// object, past the boundary it needs.
+fn parse_remote_export(stdout: &[u8]) -> Result<Value> {
+    let text = String::from_utf8_lossy(stdout);
+    if let Some(start) = text.find('{') {
+        if let Ok(value) = serde_json::from_str::<Value>(&text[start..]) {
+            return Ok(value);
+        }
+    }
+    let message_starts = text
+        .match_indices("\n    {")
+        .map(|(index, _)| index + 1)
+        .collect::<Vec<_>>();
+    let first = *message_starts
+        .first()
+        .context("the remote transcript tail held no complete OpenCode message")?;
+    let Some(last_close) = text[first..].rfind("\n    }") else {
+        bail!("the remote transcript tail held no complete OpenCode message");
+    };
+    let slice = text[first..first + last_close + "\n    }".len()].trim_end_matches(',');
+    let wrapped = format!("{{\"messages\": [{slice}\n  ]}}");
+    serde_json::from_str(&wrapped).context("could not parse the remote transcript tail")
+}
+
+/// Read one remote session's transcript for the Peek panel. OpenCode sessions
+/// export through the host's own CLI; other providers are refused for now.
+fn inspect_remote(session: &AgentSession, host: &str, ssh_bin: &str) -> Result<String> {
+    let request = remote_inspect_command(session, host, ssh_bin)?;
+    let output = CancellableProcessRunner::default().run(&request)?;
+    if output.status != 0 {
+        bail!(
+            "transcript read on {host} exited with status {status}: {stderr}",
+            status = output.status,
+            stderr = output.stderr_lossy()
+        );
+    }
+    let value = parse_remote_export(&output.stdout)?;
+    let messages = value
+        .get("messages")
+        .unwrap_or(&value);
+    crate::opencode_supervisor::render_messages(messages)
+        .or_else(|_| crate::opencode_supervisor::render_messages(&value))
+}
+
 fn is_interruptible_claude_session(session: &AgentSession) -> bool {
     session.provider == Provider::Claude
         && session.runtime == Runtime::Host
@@ -3669,5 +3754,75 @@ exit 0
             stderr: b"the OpenCode launch prompt cannot be empty".to_vec(),
         };
         assert!(!managed_launch_unavailable(&failed));
+    }
+
+    fn export_fixture() -> String {
+        serde_json::json!({
+            "info": {"id": "ses_x", "title": "Install GitLab CE"},
+            "messages": [
+                {"info": {"role": "user"}, "parts": [{"type": "text", "text": "install gitlab"}]},
+                {"info": {"role": "assistant"}, "parts": [
+                    {"type": "tool", "state": {"status": "completed"}},
+                    {"type": "text", "text": "docker compose up -d\nGitLab CE is running"}
+                ]},
+                {"info": {"role": "user"}, "parts": [{"type": "text", "text": "now check the logs"}]}
+            ]
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn remote_inspect_renders_the_transcript_text() {
+        let transcript = parse_remote_export(export_fixture().as_bytes()).unwrap();
+        let rendered =
+            crate::opencode_supervisor::render_messages(transcript.get("messages").unwrap())
+                .unwrap();
+        assert!(rendered.contains("User: install gitlab"));
+        assert!(rendered.contains("Assistant: docker compose up -d"));
+        assert!(!rendered.contains("tool"));
+    }
+
+    #[test]
+    fn remote_inspect_salvages_a_truncated_tail() {
+        // OpenCode's export is pretty-printed: message objects open at a
+        // four-space indent, which is what the tail salvage cuts at.
+        let full = serde_json::to_string_pretty(&serde_json::from_str::<serde_json::Value>(
+            &export_fixture(),
+        )
+        .unwrap())
+        .unwrap();
+        // Cut into the middle of the second message: the tail holds only the
+        // last complete message plus the trailing close of the document.
+        let cut = full.find("GitLab CE is running").unwrap() + 8;
+        let tail = &full[cut..];
+        let transcript = parse_remote_export(tail.as_bytes()).unwrap();
+        let rendered =
+            crate::opencode_supervisor::render_messages(transcript.get("messages").unwrap())
+                .unwrap();
+        assert!(rendered.contains("User: now check the logs"), "{rendered}");
+        assert!(!rendered.contains("install gitlab"), "{rendered}");
+    }
+
+    #[test]
+    fn remote_insight_command_reads_a_bounded_tail_through_a_temp_file() {
+        use std::path::Path;
+        let session = remote_session(Provider::OpenCode, None);
+        let request = remote_inspect_command(&session, "176", "ssh").unwrap();
+        let remote = request.args.last().unwrap();
+        assert!(remote.contains("opencode export '11111111-2222-3333-4444-555555555555' > \"$HOME/.tmp/agentview-inspect.json\""));
+        assert!(remote.contains("cat") && remote.contains("tail -c 400000"));
+        assert!(remote.contains("rm -f \"$HOME/.tmp/agentview-inspect.json\""));
+        assert_eq!(request.args.get(4).unwrap(), "176");
+        let _ = Path::new("unused");
+    }
+
+    #[test]
+    fn remote_inspect_refuses_other_providers() {
+        let error = remote_inspect_command(&remote_session(Provider::Claude, None), "176", "ssh")
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("not supported for Claude"),
+            "unexpected error: {error:#}"
+        );
     }
 }
